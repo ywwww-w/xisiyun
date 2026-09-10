@@ -1,0 +1,47 @@
+# Byte-compiled / optimized
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+*.egg-info/
+*.egg
+dist/
+build/
+eggs/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Environment variables
+.env
+
+# Test cache / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Uploads / logs (keep .gitkeep)
+uploads/*
+!uploads/.gitkeep
+logs/*
+!logs/.gitkeep
+
+# Temp scripts assets (large binary files)
+scripts_tmp/test_assets/51mb_*.mp3
+scripts_tmp/test_assets/*.bin
