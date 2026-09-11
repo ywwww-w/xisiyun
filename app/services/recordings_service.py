@@ -62,12 +62,17 @@ async def delete_recording_cascade(
     # tasks automatically. Delete tasks explicitly anyway for deterministic order.
     await session.execute(
         delete(Task).where(Task.recording_id == rid)
-        .execution_options(synchronize_session=False)
     )
     await session.execute(
         delete(Recording).where(Recording.id == rid)
-        .execution_options(synchronize_session=False)
     )
+    # Expunge the deleted ORM instance from session identity map so the instance
+    # itself can't be accidentally re-flushed / re-read by downstream code.
+    await session.flush()
+    try:
+        session.expunge(recording)
+    except Exception:
+        pass
     _logger.warning(
         "[recordings_service] cascade delete prepared (pending commit) recording_id=%s storage_path=%s size=%dB",
         rid, storage_path, recording.file_size_bytes,

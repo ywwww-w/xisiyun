@@ -138,13 +138,19 @@ def override_dependencies(
     monkeypatch.setattr(_main_module, "AsyncSessionLocal", TestingSessionLocal)
 
     async def _override_get_session():
+        s = TestingSessionLocal()
         try:
-            yield db_session
-        except Exception:
-            await db_session.rollback()
-            raise
+            try:
+                yield s
+                await s.commit()
+            except Exception:
+                await s.rollback()
+                raise
         finally:
-            pass
+            try:
+                await s.close()
+            except Exception:
+                pass
 
     from app.main import app as _app
 
