@@ -71,6 +71,42 @@ class BadRequestException(AppBaseException):
     ) -> None:
         super().__init__(message, code=code, details=details)
 
+    @classmethod
+    def unsupported_media_type(
+        cls,
+        *,
+        actual_ext: str | None = None,
+        allowed: list[str] | None = None,
+    ) -> "UnsupportedMediaTypeException":
+        """Helper to raise the dedicated UnsupportedMediaTypeException (415).
+
+        T6 calls this when the uploaded filename extension is not in the
+        whitelist — keeping http_status 415 + code UNSUPPORTED_MEDIA_TYPE
+        consistent with T2 handler's `UnsupportedMediaTypeException`.
+        """
+        return UnsupportedMediaTypeException(
+            message=(
+                f"Unsupported file extension '{actual_ext}'."
+                if actual_ext
+                else "Unsupported file extension"
+            ),
+            actual_ext=actual_ext,
+            allowed=allowed,
+        )
+
+    @classmethod
+    def payload_too_large(
+        cls,
+        *,
+        max_mb: int,
+        actual_bytes: int,
+    ) -> "PayloadTooLargeException":
+        """Helper to raise the dedicated PayloadTooLargeException (413)."""
+        return PayloadTooLargeException(
+            max_mb=max_mb,
+            actual_bytes=actual_bytes,
+        )
+
 
 class UnsupportedMediaTypeException(AppBaseException):
     http_status = http_status.HTTP_415_UNSUPPORTED_MEDIA_TYPE

@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 from fastapi import FastAPI
 
+from app.api.v1 import v1_router
 from app.utils.errors import register_exception_handlers
 from app.utils.logger import get_logger, setup_logging
 
@@ -33,6 +34,8 @@ app = FastAPI(
 )
 
 register_exception_handlers(app)
+
+app.include_router(v1_router)
 
 
 @app.get("/health", tags=["meta"])
