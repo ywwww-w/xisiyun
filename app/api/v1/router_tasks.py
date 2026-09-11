@@ -4,10 +4,11 @@ from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_session
-from app.schemas import TaskOut
+from app.schemas import PagedResponse, PaginationQueryParams, TaskOut
 from app.services import pipeline as pipeline_service
 from app.services.tasks_service import (
     get_task_by_id_or_404,
+    get_task_list_paged,
     retry_task as retry_task_service,
 )
 from app.utils.logger import get_logger
@@ -15,6 +16,24 @@ from app.utils.logger import get_logger
 _logger = get_logger("app.api.v1.tasks")
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
+
+
+@router.get(
+    "",
+    response_model=PagedResponse[TaskOut],
+    summary="List tasks paged (updated_at DESC) — used by frontend detail view.",
+)
+async def list_tasks_paged(
+    params: PaginationQueryParams = Depends(),
+    session: AsyncSession = Depends(get_session),
+) -> PagedResponse[TaskOut]:
+    total, rows = await get_task_list_paged(session, params.page, params.page_size)
+    return PagedResponse[TaskOut](
+        total=total,
+        page=params.page,
+        page_size=params.page_size,
+        items=[TaskOut.model_validate(r) for r in rows],
+    )
 
 
 @router.get(

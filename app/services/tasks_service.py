@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Tuple
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Recording, Task, TaskStatus
@@ -10,6 +10,30 @@ from app.utils.errors import ConflictException, NotFoundException
 from app.utils.logger import get_logger
 
 _logger = get_logger("app.services.tasks_service")
+
+
+async def get_task_list_paged(
+    session: AsyncSession,
+    page: int,
+    page_size: int,
+) -> Tuple[int, list[Task]]:
+    """Paged task list (symmetric with recordings list; frontend detail page polls
+    this to find matching task_id by recording_id).
+
+    ORDER BY updated_at DESC (most recently touched first).
+    Returns (total_count, items_on_page).
+    """
+    total: int = int(await session.scalar(
+        select(func.count()).select_from(Task)
+    ) or 0)
+    stmt = (
+        select(Task)
+        .order_by(Task.updated_at.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+    return total, list(rows)
 
 
 async def get_task_by_id_or_404(session: AsyncSession, task_id: str) -> Task:

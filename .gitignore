@@ -2,6 +2,9 @@
 __pycache__/
 *.py[cod]
 *$py.class
+# Also catch scripts_tmp/ bytecode explicitly (not strictly needed, but clarity)
+scripts_tmp/**/__pycache__/
+scripts_tmp/**/*.pyc
 
 # Distribution / packaging
 *.egg-info/
