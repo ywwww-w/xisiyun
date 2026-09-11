@@ -14,6 +14,7 @@ from app.config import Settings
 from app.database import get_session
 from app.models import Recording, Task, TaskStatus
 from app.schemas import UploadResponse
+from app.services.pipeline import enqueue_task
 from app.services.storage import (
     compute_file_md5_streaming,
     delete_file_if_exists,
@@ -165,11 +166,12 @@ async def create_recording(
         delete_file_if_exists(storage_path)
         raise
 
-    # Step 7: enqueue task — placeholder TODO, T7 will fill real queue worker here.
-    #   DO NOT implement queue in T6 scope. Leave a comment only.
-    # TODO(T7): enqueue task_id into asyncio Queue so worker picks it up.
+    # Step 7: enqueue task into pipeline queue — worker (from T7 pipeline service) picks it up
+    #   Semaphore(3) controls concurrency; run_pipeline is a placeholder (T9 替换真实状态机)。
+    assert task_id is not None
+    await enqueue_task(task_id)
     _logger.info(
-        "[upload] inserted new recording_id=%s task_id=%s md5=%s bytes=%d (T7 enqueue pending)",
+        "[upload] inserted new recording_id=%s task_id=%s md5=%s bytes=%d (queued)",
         recording_id,
         task_id,
         md5_hex,

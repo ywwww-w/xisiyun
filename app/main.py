@@ -5,6 +5,10 @@ from datetime import datetime, timezone
 from fastapi import FastAPI
 
 from app.api.v1 import v1_router
+from app.config import Settings
+from app.database import AsyncSessionLocal
+from app.services import pipeline as pipeline_service
+from app.services.storage import ensure_upload_dir
 from app.utils.errors import register_exception_handlers
 from app.utils.logger import get_logger, setup_logging
 
@@ -13,18 +17,28 @@ from app.utils.logger import get_logger, setup_logging
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     setup_logging()
     logger = get_logger("app.main")
+    settings = Settings()
     logger.info(
         "Starting %s v%s",
         app.title,
         app.version,
         extra={"task_id": "bootstrap"},
     )
+    # --- Startup ---
+    ensure_upload_dir()
+    await pipeline_service.start_workers(settings)
+    async with AsyncSessionLocal() as session:
+        await pipeline_service.resume_pending_tasks_on_startup(session)
+
     yield
+
+    # --- Shutdown ---
     logger.info(
         "Shutting down %s",
         app.title,
         extra={"task_id": "shutdown"},
     )
+    await pipeline_service.shutdown_workers()
 
 
 app = FastAPI(
