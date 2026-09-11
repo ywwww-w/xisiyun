@@ -5,7 +5,8 @@ import uuid
 from pathlib import Path
 from typing import Tuple
 
-from fastapi import APIRouter, Depends, File, UploadFile, status
+from fastapi import APIRouter, Depends, File, Response, UploadFile, status
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,8 +14,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import Settings
 from app.database import get_session
 from app.models import Recording, Task, TaskStatus
-from app.schemas import UploadResponse
+from app.schemas import (
+    LLMSummaryResponse,
+    PagedResponse,
+    PaginationQueryParams,
+    RecordingDetailOut,
+    RecordingListItem,
+    SummaryOut,
+    UploadResponse,
+)
 from app.services.pipeline import enqueue_task
+from app.services.recordings_service import (
+    delete_recording_cascade,
+    get_recording_detail_or_404,
+    get_recording_list_paged,
+)
 from app.services.storage import (
     compute_file_md5_streaming,
     delete_file_if_exists,
@@ -205,3 +219,98 @@ async def _find_existing_recording(
     if row is None:
         return None
     return row[0], row[1]
+
+
+@router.get(
+    "",
+    response_model=PagedResponse[RecordingListItem],
+)
+async def list_recordings(
+    query: PaginationQueryParams = Depends(),
+    session: AsyncSession = Depends(get_session),
+) -> PagedResponse[RecordingListItem]:
+    """GET /v1/recordings — paged list, ORDER BY created_at DESC (spec §2.2 row 3)."""
+    total, rows = await get_recording_list_paged(session, query.page, query.page_size)
+    return PagedResponse[RecordingListItem](
+        total=total,
+        page=query.page,
+        page_size=query.page_size,
+        items=[RecordingListItem.model_validate(r) for r in rows],
+    )
+
+
+@router.get(
+    "/{recording_id}",
+    response_model=RecordingDetailOut,
+)
+async def get_recording_detail(
+    recording_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> RecordingDetailOut:
+    """GET /v1/recordings/{id} — detail view.
+
+    Field access rule (T11 §任务2 detail handler + spec §2.2 row 4):
+      - last_status != 'done'          → transcript=None, summary=None
+      - last_status == 'done'          → transcript = recording.transcript (always show if done)
+                                         summary  = SummaryOut(validated summary_json) or None
+      - even status=done but summary_json invalid (schema broken / key_points empty) →
+        transcript still returned (useable), summary=None, WARNING logged.
+    """
+    rec = await get_recording_detail_or_404(session, recording_id)
+    await session.refresh(rec)
+    base = RecordingDetailOut.model_validate(rec)
+    # model_validate copies base fields; manually override None-safe accessors:
+    base.transcript = None
+    base.summary = None
+    if rec.last_status == TaskStatus.done:
+        base.transcript = rec.transcript
+        if rec.summary_json is not None:
+            try:
+                validated = LLMSummaryResponse.model_validate(rec.summary_json)
+                base.summary = SummaryOut(**validated.model_dump())
+            except ValidationError as exc:
+                _logger.warning(
+                    "[recordings] recording_id=%s summary_json invalid even status=done: %s. "
+                    "Returning transcript only (summary=null).",
+                    recording_id, exc,
+                    extra={"task_id": f"recording:{recording_id}"},
+                )
+    return base
+
+
+@router.delete(
+    "/{recording_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+    responses={204: {"description": "Recording deleted (cascade tasks rows + disk file)"}},
+)
+async def delete_recording(
+    recording_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    """DELETE /v1/recordings/{id} — 204 No Content.
+
+    Order (spec §4.5 DELETE boundary + tickets.md §任务1 2nd function):
+      1. NotFound guard (not found -> 404).
+      2. DB: cascade delete tasks + recordings (transactional).
+      3. COMMIT.
+      4. Disk: storage.delete_file_if_exists (FileNotFound -> ignore, no 500).
+    """
+    rec = await get_recording_detail_or_404(session, recording_id)
+    size_bytes = int(rec.file_size_bytes or 0)
+    storage_path, rid = await delete_recording_cascade(session, rec)
+    await session.commit()
+    try:
+        delete_file_if_exists(storage_path)
+    except Exception as exc:  # pragma: no cover - best effort
+        _logger.warning(
+            "[recordings] delete recording_id=%s file FAILED (DB already committed, ignore): %s",
+            rid, exc,
+            extra={"task_id": f"recording:{rid}"},
+        )
+    _logger.warning(
+        "[recordings] deleted recording_id=%s (file_path=%s, size=%dB)",
+        rid, storage_path, size_bytes,
+        extra={"task_id": f"recording:{rid}"},
+    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
