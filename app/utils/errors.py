@@ -80,9 +80,12 @@ class UnsupportedMediaTypeException(AppBaseException):
         self,
         message: str = "Unsupported media type",
         *,
+        actual_ext: str | None = None,
         allowed: list[str] | None = None,
     ) -> None:
         details: dict[str, Any] = {}
+        if actual_ext is not None:
+            details["actual_extension"] = actual_ext
         if allowed is not None:
             details["allowed_extensions"] = allowed
         super().__init__(message, details=details or None)
