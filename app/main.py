@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from app.api.v1 import v1_router
 from app.config import Settings
 from app.database import AsyncSessionLocal
+from app.services import llm as llm_service
 from app.services import pipeline as pipeline_service
 from app.services.storage import ensure_upload_dir
 from app.utils.errors import register_exception_handlers
@@ -26,6 +27,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     # --- Startup ---
     ensure_upload_dir()
+    llm_service.init_client(settings)
     await pipeline_service.start_workers(settings)
     async with AsyncSessionLocal() as session:
         await pipeline_service.resume_pending_tasks_on_startup(session)
@@ -39,6 +41,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         extra={"task_id": "shutdown"},
     )
     await pipeline_service.shutdown_workers()
+    await llm_service.shutdown_client()
 
 
 app = FastAPI(
