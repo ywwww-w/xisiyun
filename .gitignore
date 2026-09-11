@@ -45,3 +45,8 @@ logs/*
 # Temp scripts assets (large binary files)
 scripts_tmp/test_assets/51mb_*.mp3
 scripts_tmp/test_assets/*.bin
+# General large binary > 100MB that should never be committed
+*.100mb+
+*.iso
+*.zip
+scripts_tmp/test_assets/large_*

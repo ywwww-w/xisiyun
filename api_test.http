@@ -1,0 +1,258 @@
+### =====================================================
+### 录音转写服务 API 调试脚本（JetBrains .http 格式 / VS Code REST Client）
+### 使用：
+###   1. 启动服务：uvicorn app.main:app --port 8000 --limit-max-request-size=52428800
+###   2. PyCharm Professional：直接点击每个块左侧 ▶ 绿色箭头运行
+###   3. VS Code：装 "REST Client" 插件（humao.rest-client），点击 "Send Request"
+### 顺序：从上往下依次点 ▶（后面的块依赖第 1 块的 {{recording_id}} 和 {{task_id}} 变量
+###
+### 兼容性说明：
+###   - JetBrains (.http) 变量保存使用 > {% client.global.set(...) %} 语法（见第 1 块末尾）
+###   - VS Code REST Client 变量保存使用 @recordingId = {{response.body.$.recording_id}} 语法
+###     （每个块下方都注释了对应 VS Code 写法，按需启用
+###
+### 51MB 大文件生成（PowerShell）：
+###   fsutil file createnew scripts_tmp\test_assets\51mb_fake.mp3 53477376
+###   （53477376 = 51 * 1024 * 1024 = 51MB
+### =====================================================
+@baseUrl = http://localhost:8000
+
+### =====================================================
+### 0. Health Check
+### 预期：HTTP 200  {"status":"ok"}
+### =====================================================
+GET {{baseUrl}}/health
+Accept: application/json
+
+> {%
+    client.test("status 200 ok", function() { client.assert(response.status === 200, "Expected 200"); });
+    client.test("body.status == ok", function() { client.assert(response.body.status === "ok", "Expected status=ok"); });
+%}
+
+# --------------------------------------------------------------------
+# VS Code REST Client 断言写法（二选一，按需启用注释）：
+# @healthStatus = {{response.body.$.status}}
+# 断言：{{healthStatus}} === ok
+# --------------------------------------------------------------------
+
+### =====================================================
+### 1. 上传合法 wav（保存 recording_id 和 task_id，MD5 幂等基准文件）
+### 预期：HTTP 200，body 含 recording_id / task_id / md5 / original_filename=sample.wav
+### =====================================================
+POST {{baseUrl}}/v1/recordings
+Content-Type: multipart/form-data; boundary=----WebKitFormBoundary7MA4YWxkTrZu0gW
+
+------WebKitFormBoundary7MA4YWxkTrZu0gW
+Content-Disposition: form-data; name="file"; filename="sample.wav"
+Content-Type: audio/wav
+
+< ./scripts_tmp/test_assets/sample.wav
+------WebKitFormBoundary7MA4YWxkTrZu0gW--
+
+> {%
+    client.test("upload HTTP 200", function() { client.assert(response.status === 200, "Expected 200"); });
+    client.test("recording_id present", function() { client.assert(!!response.body.recording_id, "recording_id missing"); });
+    client.test("task_id present", function() { client.assert(!!response.body.task_id, "task_id missing"); });
+    // JetBrains 全局变量保存（后续块用 {{recording_id}} / {{task_id}} 引用）
+    var rid = response.body.recording_id;
+    var tid = response.body.task_id;
+    client.global.set("recording_id", rid);
+    client.global.set("task_id", tid);
+    client.log("Saved: recording_id=" + rid + ", task_id=" + tid);
+%}
+
+# --------------------------------------------------------------------
+# VS Code REST Client 变量保存写法（二选一，启用下面三行注释掉 JetBrains 段，用下面三行）：
+# @recording_id = {{response.body.$.recording_id}}
+# @task_id = {{response.body.$.task_id}}
+# @md5 = {{response.body.$.md5}}
+# --------------------------------------------------------------------
+
+### =====================================================
+### 2. 上传 51MB 超大文件（预期 HTTP 413 Payload Too Large）
+### 前置：先生成大文件  fsutil file createnew scripts_tmp\test_assets\51mb_fake.mp3 53477376
+### 预期：HTTP 413，error.code = PAYLOAD_TOO_LARGE
+### =====================================================
+POST {{baseUrl}}/v1/recordings
+Content-Type: multipart/form-data; boundary=----WebKitFormBoundary7MA4YWxkTrZu0gW
+
+------WebKitFormBoundary7MA4YWxkTrZu0gW
+Content-Disposition: form-data; name="file"; filename="51mb_fake.mp3"
+Content-Type: audio/mpeg
+
+< ./scripts_tmp/test_assets/51mb_fake.mp3
+------WebKitFormBoundary7MA4YWxkTrZu0gW--
+
+> {%
+    client.test("upload 51MB HTTP 413", function() { client.assert(response.status === 413, "Expected 413 PAYLOAD_TOO_LARGE"); });
+%}
+
+### =====================================================
+### 3. 上传 txt 非音频扩展名（预期 HTTP 415 Unsupported Media Type）
+### 预期：HTTP 415，error.code = UNSUPPORTED_MEDIA_TYPE
+### =====================================================
+POST {{baseUrl}}/v1/recordings
+Content-Type: multipart/form-data; boundary=----WebKitFormBoundary7MA4YWxkTrZu0gW
+
+------WebKitFormBoundary7MA4YWxkTrZu0gW
+Content-Disposition: form-data; name="file"; filename="wrong.txt"
+Content-Type: text/plain
+
+< ./scripts_tmp/test_assets/wrong.txt
+------WebKitFormBoundary7MA4YWxkTrZu0gW--
+
+> {%
+    client.test("txt HTTP 415", function() { client.assert(response.status === 415, "Expected 415 UNSUPPORTED_MEDIA_TYPE"); });
+%}
+
+### =====================================================
+### 4. 同 MD5 文件第二次上传（幂等：返回和第 1 块相同 recording_id）
+### 预期：HTTP 200，response.body.recording_id === {{recording_id}}（和第 1 块一致）
+### =====================================================
+POST {{baseUrl}}/v1/recordings
+Content-Type: multipart/form-data; boundary=----WebKitFormBoundary7MA4YWxkTrZu0gW
+
+------WebKitFormBoundary7MA4YWxkTrZu0gW
+Content-Disposition: form-data; name="file"; filename="sample_dup.wav"
+Content-Type: audio/wav
+
+< ./scripts_tmp/test_assets/sample.wav
+------WebKitFormBoundary7MA4YWxkTrZu0gW--
+
+> {%
+    client.test("idempotent upload HTTP 200", function() { client.assert(response.status === 200, "Expected 200"); });
+    var expectedRid = client.global.get("recording_id");
+    client.test("recording_id identical to block 1", function() {
+        client.assert(response.body.recording_id === expectedRid,
+            "Expected same recording_id. block1=" + expectedRid + " block4=" + response.body.recording_id);
+    });
+%}
+
+### =====================================================
+### 5. 查询任务状态（上传后 0~5 秒应该是 pending / transcribing）
+### 预期：HTTP 200，body.status ∈ {pending, transcribing, summarizing, done, failed}
+### =====================================================
+GET {{baseUrl}}/v1/tasks/{{task_id}}
+Accept: application/json
+
+> {%
+    client.test("GET task HTTP 200", function() { client.assert(response.status === 200, "Expected 200"); });
+    var status = response.body.status;
+    var allowed = ["pending","transcribing","summarizing","done","failed"];
+    client.test("status ∈ 5-state set", function() { client.assert(allowed.indexOf(status) >= 0, "status=" + status); });
+    client.log("task status = " + status);
+%}
+
+### =====================================================
+### 6. 30 秒后再查任务状态（应该是 summarizing/done 或失败；若已 done 可直接跳过再跑一遍）
+### 预期：HTTP 200
+### =====================================================
+GET {{baseUrl}}/v1/tasks/{{task_id}}
+Accept: application/json
+
+> {%
+    client.test("GET task after wait HTTP 200", function() { client.assert(response.status === 200, "Expected 200"); });
+    client.log("task status after wait = " + response.body.status);
+    client.log("task total_retry_count = " + response.body.total_retry_count);
+%}
+
+### =====================================================
+### 7. GET 录音详情（status=done 时会有 transcript + summary 字段；pending 时皆为 null）
+### 预期：HTTP 200；若 last_status != done → transcript=null summary=null
+###                     若 last_status == done → transcript≥500字 + summary 三键齐全 key_points≥1
+### =====================================================
+GET {{baseUrl}}/v1/recordings/{{recording_id}}
+Accept: application/json
+
+> {%
+    client.test("GET recording detail HTTP 200", function() { client.assert(response.status === 200, "Expected 200"); });
+    client.log("recording last_status = " + response.body.last_status);
+    if (response.body.last_status === "done") {
+        client.test("transcript != null", function() { client.assert(response.body.transcript !== null, "Expected transcript!=null when done"); });
+        client.test("summary != null", function() { client.assert(response.body.summary !== null, "Expected summary!=null when done"); });
+        if (response.body.summary) {
+            client.test("summary 3 keys", function() {
+                client.assert(
+                    response.body.summary.summary !== undefined &&
+                    response.body.summary.key_points !== undefined &&
+                    response.body.summary.todos !== undefined,
+                    "Expected summary 3 keys");
+            });
+        }
+    } else {
+        client.test("transcript null when not done", function() { client.assert(response.body.transcript === null, "Expected transcript=null"); });
+        client.test("summary null when not done", function() { client.assert(response.body.summary === null, "Expected summary=null"); });
+    }
+%}
+
+### =====================================================
+### 8a. 先手动 MySQL 把任务置为 failed → POST retry 成功 → 200 pending
+### 执行前请先在 MySQL 执行（把 {{task_id}} 替换成实际值）：
+###   USE xisiyun_asr;
+###   UPDATE tasks SET status='failed', error_message='manual force failed for test' WHERE id='{{task_id}}';
+###   UPDATE recordings SET last_status='failed' WHERE id='{{recording_id}}';
+### 然后再点 ▶ 发送本请求
+### 预期：HTTP 200，body.status=pending，body.total_retry_count = 1（或之前值 + 1）
+### =====================================================
+POST {{baseUrl}}/v1/tasks/{{task_id}}/retry
+Accept: application/json
+
+> {%
+    client.test("retry failed task HTTP 200", function() { client.assert(response.status === 200, "Expected 200 after retry failed"); });
+    client.test("after retry status==pending", function() { client.assert(response.body.status === "pending", "Expected status=pending"); });
+    client.log("after retry total_retry_count = " + response.body.total_retry_count);
+%}
+
+### =====================================================
+### 8b. 紧接着第二次 retry（幂等：返回 409 TASK_NOT_RETRYABLE）
+### 预期：HTTP 409，error.code = TASK_NOT_RETRYABLE
+### =====================================================
+POST {{baseUrl}}/v1/tasks/{{task_id}}/retry
+Accept: application/json
+
+> {%
+    client.test("retry again HTTP 409", function() { client.assert(response.status === 409, "Expected 409 CONFLICT"); });
+    client.test("error.code = TASK_NOT_RETRYABLE", function() {
+        client.assert(response.body.error && response.body.error.code === "TASK_NOT_RETRYABLE",
+            "Expected TASK_NOT_RETRYABLE. got code=" + (response.body.error ? response.body.error.code);
+    });
+%}
+
+### =====================================================
+### 9a. DELETE recording（返回 204 No Content，无响应体）
+### 预期：HTTP 204
+### =====================================================
+DELETE {{baseUrl}}/v1/recordings/{{recording_id}}
+Accept: application/json
+
+> {%
+    client.test("DELETE HTTP 204", function() { client.assert(response.status === 204, "Expected 204 No Content"); });
+%}
+
+### =====================================================
+### 9b. 再 GET recording（返回 404 NOT_FOUND）
+### 预期：HTTP 404，error.code = NOT_FOUND
+### =====================================================
+GET {{baseUrl}}/v1/recordings/{{recording_id}}
+Accept: application/json
+
+> {%
+    client.test("GET after DELETE HTTP 404", function() { client.assert(response.status === 404, "Expected 404 NOT_FOUND"); });
+    client.test("error.code = NOT_FOUND", function() {
+        client.assert(response.body.error && response.body.error.code === "NOT_FOUND",
+            "Expected NOT_FOUND. got code=" + (response.body.error ? response.body.error.code));
+    });
+%}
+
+### =====================================================
+### 附：再 DELETE 一次（行不存在，应返回 404；若文件已不存在也应 204 看实现）
+### =====================================================
+DELETE {{baseUrl}}/v1/recordings/{{recording_id}}
+Accept: application/json
+
+> {%
+    client.test("DELETE again HTTP ∈ {204,404} idempotent", function() {
+        client.assert(response.status === 204 || response.status === 404,
+            "Expected 204 or 404, got " + response.status);
+    });
+%}
