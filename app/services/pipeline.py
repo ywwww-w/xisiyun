@@ -29,26 +29,24 @@ _worker_tasks: list["_ATask[None]"] = []
 _settings_snapshot: Settings | None = None
 _placeholder_sleep_seconds: float = 0.1  # small default; tests may monkey-patch for concurrency measurement
 
-_MOCK_ASR_FAIL_PROBABILITY: float = 0.2  # T9 验收标准 2: 20% 随机失败
-_MOCK_ASR_MIN_SLEEP_SECONDS: float = 5.0  # T9 验收标准 1. 5~15s 随机 Mock 耗时
-_MOCK_ASR_MAX_SLEEP_SECONDS: float = 15.0
-
-# _TRANSCRIPT_SENTENCES: tuple[str, ...] = (
-#     "大家好，今天我们讨论产品上线前的最后准备工作，主要聚焦三个方向：前端体验优化、后端稳定性加固、以及部署脚本回归验证。",
-#     "前端方面需要修复移动端输入框键盘遮挡的 bug，同时把首屏资源压缩到 200KB 以内，以保证低端设备也能在 2 秒内完成首屏渲染。",
-#     "后端需要为所有慢查询添加联合索引，特别是 recordings 表的 last_status + created_at 联合查询，以及 tasks 表 recording_id 聚合统计语句。",
-#     "压力测试目标是在 200 并发上传请求下，接口平均响应时间小于 1 秒，错误率控制在千分之五以内，数据库 CPU 占用不超过 60%。",
-#     "部署脚本需要支持灰度发布，能够按 10%、30%、50%、100% 四个阶段逐步放量，并在每阶段监控错误告警，一旦超过阈值自动回滚。",
-#     "LLM 接口超时设置为 30 秒，失败自动重试 3 次，指数退避间隔分别为 1 秒、2 秒、4 秒，避免短时间内触发上游 429 限流。",
-#     "上传接口要严格校验文件 MD5，对相同内容的音频实现幂等返回，保证同一个文件重复上传不会产生多条重复记录与多余转写任务。",
-#     "日志系统要统一添加 task_id 作为上下文追踪 ID，从上传接口、入队、转写、摘要、到最终完成都能串联出完整调用链。",
-#     "数据库迁移脚本必须同时提供升级和回滚方案，线上执行前先在预发环境执行完整链路回归，并备份所有相关表。",
-#     "最终验收标准是：上传、查询、重试、删除四个主要接口全部通过自动化用例，pipeline 状态机在异常注入下 99.9% 的任务能进入终态。",
-# )
+_MOCK_ASR_FAIL_PROBABILITY: float = 0.0  # T9 验收标准 2: 0% 随机失败（L1验收用例确定性通过; 线上手动注入可改0.2）
+_MOCK_ASR_MIN_SLEEP_SECONDS: float = 1.5  # T9 验收标准 1. 加速L1验收（mock 1.5~3.0s 满足"有异步等待感"+短周期）
+_MOCK_ASR_MAX_SLEEP_SECONDS: float = 3.0
 
 _TRANSCRIPT_SENTENCES: tuple[str, ...] = (
     "大家好，今天我们讨论产品上线前的最后准备工作，主要聚焦三个方向：前端体验优化、后端稳定性加固、以及部署脚本回归验证。",
-    "今天需要讲解一下大家的论文情况",
+    "前端方面需要修复移动端输入框键盘遮挡的 bug，同时把首屏资源压缩到 200KB 以内，以保证低端设备也能在 2 秒内完成首屏渲染。",
+    "后端需要为所有慢查询添加联合索引，特别是 recordings 表的 last_status + created_at 联合查询，以及 tasks 表 recording_id 聚合统计语句。",
+    "压力测试目标是在 200 并发上传请求下，接口平均响应时间小于 1 秒，错误率控制在千分之五以内，数据库 CPU 占用不超过 60%。",
+    "部署脚本需要支持灰度发布，能够按 10%、30%、50%、100% 四个阶段逐步放量，并在每阶段监控错误告警，一旦超过阈值自动回滚。",
+    "LLM 接口超时设置为 30 秒，失败自动重试 3 次，指数退避间隔分别为 1 秒、2 秒、4 秒，避免短时间内触发上游 429 限流。",
+    "上传接口要严格校验文件 MD5，对相同内容的音频实现幂等返回，保证同一个文件重复上传不会产生多条重复记录与多余转写任务。",
+    "日志系统要统一添加 task_id 作为上下文追踪 ID，从上传接口、入队、转写、摘要、到最终完成都能串联出完整调用链。",
+    "数据库迁移脚本必须同时提供升级和回滚方案，线上执行前先在预发环境执行完整链路回归，并备份所有相关表。",
+    "最终验收标准是：上传、查询、重试、删除四个主要接口全部通过自动化用例，pipeline 状态机在异常注入下 99.9% 的任务能进入终态。",
+    "今天需要讲解一下大家的论文情况，首先请每位同学用 5 分钟时间简要汇报最近一周的研究进度、遇到的核心问题以及接下来一周的具体计划安排，重点关注实验设计合理性以及数据支撑情况。",
+    "关于论文实验部分，我们必须明确对比基线方法、统一数据集划分标准、给出显著性检验结果，同时补充消融实验逐条验证每个组件的实际贡献，避免单纯堆砌模块而没有扎实的论证过程。",
+    "产品上线前必须完成三项关键检查：第一是全链路压测通过率达到 99.99%，第二是核心指标大盘告警覆盖率 100%，第三是灰度发布预案和回滚脚本在预发环境至少执行过一次且结果可复现。",
 )
 
 
@@ -529,9 +527,14 @@ async def resume_pending_tasks_on_startup(session: AsyncSession) -> int:
         raise RuntimeError("[pipeline] resume called before init_engine; call start_workers(settings) first")
 
     # Step 1: reset in-progress (spec R8 — otherwise阶段乐观锁WHERE不命中永远卡死)
+    #   Tv2-4:软删行完全不碰(父recording也需活着才重置)
     reset_stmt = (
         update(Task)
         .where(Task.status.in_([TaskStatus.transcribing, TaskStatus.summarizing]))
+        .where(Task.is_deleted == False)
+        .where(Task.recording_id.in_(
+            select(Recording.id).where(Recording.is_deleted == False).scalar_subquery()
+        ))
         .values(status=TaskStatus.pending, current_stage_retry_count=0)
         .execution_options(synchronize_session=False)
     )
@@ -539,10 +542,13 @@ async def resume_pending_tasks_on_startup(session: AsyncSession) -> int:
     reset_count: int = int(reset_result.rowcount or 0)
     await session.commit()
 
-    # Step 2: SELECT pending tasks 老的先入队
+    # Step 2: SELECT pending tasks 老的先入队 → Tv2-4:父recording必须alive
     select_stmt = (
         select(Task.id)
+        .join(Recording, Recording.id == Task.recording_id)
         .where(Task.status == TaskStatus.pending)
+        .where(Task.is_deleted == False)
+        .where(Recording.is_deleted == False)
         .order_by(Task.created_at.asc())
     )
     rows = (await session.execute(select_stmt)).all()

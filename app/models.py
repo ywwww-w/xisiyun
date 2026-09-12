@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     Column,
     DateTime,
     Enum,
@@ -20,6 +21,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
+from sqlalchemy.dialects import mysql
 
 from app.database import Base
 
@@ -30,6 +32,7 @@ class TaskStatus(str, enum.Enum):
     summarizing = "summarizing"
     done = "done"
     failed = "failed"
+    archived = "archived"
 
 
 def _new_uuid() -> str:
@@ -108,10 +111,22 @@ class Recording(Base):
         doc="自动 onupdate (spec §4.4.1 updated_at)",
     )
 
+    is_deleted: Column[bool] = Column(
+        Boolean().with_variant(mysql.TINYINT(unsigned=False), "mysql"),
+        nullable=False,
+        server_default=func.false(),
+        doc="False=正常可见 True=已进入回收站(A-Lite档)",
+    )
+    deleted_at: Column[datetime | None] = Column(
+        DateTime(timezone=True),
+        nullable=True,
+        doc="软删时间点,30天后真删(A-Full档TTL)",
+    )
+
     __table_args__ = (
-        UniqueConstraint("file_hash", name="uk_recordings_file_hash"),
         Index("idx_recordings_last_status", "last_status"),
         Index("idx_recordings_created_at", "created_at"),
+        Index("idx_recordings_alive_created", "is_deleted", "created_at"),
     )
 
 
@@ -175,8 +190,21 @@ class Task(Base):
         doc="spec §4.4.2 updated_at + idx_tasks_updated_at 索引",
     )
 
+    is_deleted: Column[bool] = Column(
+        Boolean().with_variant(mysql.TINYINT(unsigned=False), "mysql"),
+        nullable=False,
+        server_default=func.false(),
+        doc="通常=父recording.is_deleted",
+    )
+    deleted_at: Column[datetime | None] = Column(
+        DateTime(timezone=True),
+        nullable=True,
+        doc="通常=父recording.deleted_at",
+    )
+
     __table_args__ = (
         Index("idx_tasks_status", "status"),
         Index("idx_tasks_recording_id", "recording_id"),
         Index("idx_tasks_updated_at", "updated_at"),
+        Index("idx_tasks_alive_status", "is_deleted", "status"),
     )

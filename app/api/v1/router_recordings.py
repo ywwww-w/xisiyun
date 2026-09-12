@@ -28,10 +28,14 @@ from app.services.recordings_service import (
     delete_recording_cascade,
     get_recording_detail_or_404,
     get_recording_list_paged,
+    restore_recording_or_409,
+    soft_delete_recording_cascade,
 )
 from app.services.storage import (
     compute_file_md5_streaming,
     delete_file_if_exists,
+    move_trash_back_to_upload,
+    move_upload_to_trash,
     save_uploaded_file,
 )
 from app.utils.errors import BadRequestException
@@ -213,6 +217,7 @@ async def _find_existing_recording(
         .select_from(Recording)
         .join(Task, Task.recording_id == Recording.id)
         .where(Recording.file_hash == file_hash)
+        .where(Recording.is_deleted == False)   # Tv2-4 + 3-B: 已软删行让出hash槽,再次上传开新id
         .limit(1)
     )
     row = (await session.execute(stmt)).first()
@@ -245,9 +250,13 @@ async def list_recordings(
 )
 async def get_recording_detail(
     recording_id: str,
+    include_deleted: bool = False,
     session: AsyncSession = Depends(get_session),
 ) -> RecordingDetailOut:
     """GET /v1/recordings/{id} — detail view.
+
+    QueryParams:
+      - include_deleted: bool (default False) = True时可查已软删archived明细(用于回收站详情页)
 
     Field access rule (T11 §任务2 detail handler + spec §2.2 row 4):
       - last_status != 'done'          → transcript=None, summary=None
@@ -256,7 +265,7 @@ async def get_recording_detail(
       - even status=done but summary_json invalid (schema broken / key_points empty) →
         transcript still returned (useable), summary=None, WARNING logged.
     """
-    rec = await get_recording_detail_or_404(session, recording_id)
+    rec = await get_recording_detail_or_404(session, recording_id, exclude_deleted=not include_deleted)
     await session.refresh(rec)
     base = RecordingDetailOut.model_validate(rec)
     # model_validate copies base fields; manually override None-safe accessors:
@@ -282,7 +291,7 @@ async def get_recording_detail(
     "/{recording_id}",
     status_code=status.HTTP_204_NO_CONTENT,
     response_class=Response,
-    responses={204: {"description": "Recording deleted (cascade tasks rows + disk file)"}},
+    responses={204: {"description": "Recording logically deleted -> .trash/ (30 day TTL manual clean)"}},
 )
 async def delete_recording(
     recording_id: str,
@@ -290,27 +299,77 @@ async def delete_recording(
 ) -> Response:
     """DELETE /v1/recordings/{id} — 204 No Content.
 
-    Order (spec §4.5 DELETE boundary + tickets.md §任务1 2nd function):
-      1. NotFound guard (not found -> 404).
-      2. DB: cascade delete tasks + recordings (transactional).
+    Order (Tv2方案A-Lite 逻辑删除：DB先软删，文件移trash；30天后手动清）：
+      1. NotFound guard (exclude_deleted=True so 已删的再DELETE -> 404）。
+      2. DB: soft_delete_recording_cascade (UPDATE is_deleted=True archived状态).
       3. COMMIT.
-      4. Disk: storage.delete_file_if_exists (FileNotFound -> ignore, no 500).
+      4. Disk: move_upload_to_trash (同分区rename跨盘copy+unlink, missing_ok)
     """
     rec = await get_recording_detail_or_404(session, recording_id)
     size_bytes = int(rec.file_size_bytes or 0)
-    storage_path, rid = await delete_recording_cascade(session, rec)
+    storage_path, rid = await soft_delete_recording_cascade(session, rec)
     await session.commit()
     try:
-        delete_file_if_exists(storage_path)
+        trash_path = await move_upload_to_trash(storage_path)
     except Exception as exc:  # pragma: no cover - best effort
         _logger.warning(
-            "[recordings] delete recording_id=%s file FAILED (DB already committed, ignore): %s",
+            "[recordings] move trash FAILED recording_id=%s (DB already committed, ignore): %s",
             rid, exc,
             extra={"task_id": f"recording:{rid}"},
         )
+        trash_path = "<error>"
     _logger.warning(
-        "[recordings] deleted recording_id=%s (file_path=%s, size=%dB)",
-        rid, storage_path, size_bytes,
+        "[recordings] soft-deleted recording_id=%s trash_path='%s' size=%dB",
+        rid, trash_path, size_bytes,
         extra={"task_id": f"recording:{rid}"},
     )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    "/{recording_id}/restore",
+    response_model=RecordingDetailOut,
+)
+async def restore_recording(
+    recording_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> RecordingDetailOut:
+    """POST /v1/recordings/{id}/restore — undo logical delete (idempotent).
+
+    404 iff id really nonexistent; already alive → simply return detail.
+    After DB commit → move_trash_back_to_upload (A-Full会409若TTL已清理; A-Lite 100% 存在)
+    """
+    rec = await get_recording_detail_or_404(session, recording_id, exclude_deleted=False)
+    await restore_recording_or_409(session, rec)
+    await session.commit()
+    try:
+        await move_trash_back_to_upload(rec.storage_path)
+    except ConflictException:
+        raise
+    except Exception as exc:  # pragma: no cover
+        _logger.warning(
+            "[restore] move from trash back failed recording_id=%s: %s",
+            recording_id, exc,
+            extra={"task_id": f"recording:{recording_id}"},
+        )
+    refreshed = await get_recording_detail_or_404(session, recording_id)
+    await session.refresh(refreshed)
+    base = RecordingDetailOut.model_validate(refreshed)
+    base.transcript = refreshed.transcript if isinstance(refreshed.transcript, str) and len(refreshed.transcript) > 0 else None
+    base.summary = None
+    if refreshed.summary_json is not None:
+        try:
+            validated = LLMSummaryResponse.model_validate(refreshed.summary_json)
+            base.summary = SummaryOut(**validated.model_dump())
+        except ValidationError as exc:
+            _logger.warning(
+                "[restore] recording_id=%s summary_json invalid after restore: %s",
+                recording_id, exc,
+                extra={"task_id": f"recording:{recording_id}"},
+            )
+    _logger.info(
+        "[restore] POST finish rid=%s last_status=%s has_transcript=%s has_summary=%s",
+        recording_id, refreshed.last_status, base.transcript is not None, base.summary is not None,
+        extra={"task_id": f"recording:{recording_id}"},
+    )
+    return base

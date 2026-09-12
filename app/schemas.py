@@ -15,6 +15,7 @@ class TaskStatus(str, Enum):
     summarizing = "summarizing"
     done = "done"
     failed = "failed"
+    archived = "archived"
 
 
 class BaseSchema(BaseModel):
@@ -50,6 +51,8 @@ class TaskOut(BaseSchema):
     error_message: str | None = None
     created_at: datetime
     updated_at: datetime
+    is_deleted: bool = False
+    deleted_at: datetime | None = None
 
 
 class SummaryOut(BaseSchema):
@@ -66,6 +69,8 @@ class RecordingListItem(BaseSchema):
     last_status: TaskStatus
     created_at: datetime
     updated_at: datetime
+    is_deleted: bool = False
+    deleted_at: datetime | None = None
 
 
 class RecordingDetailOut(RecordingListItem):

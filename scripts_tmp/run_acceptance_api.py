@@ -195,16 +195,114 @@ async def main():
                 results.append({"Test":f"8.{nm} SKIP","Expected":"MySQL.exe","Actual":"missing","Pass":False,"Note":"MySQL CLI not found at default path; skipped automated SQL injection"})
             print("    MySQL client missing, SKIP 8.*")
 
-        # 9 DELETE recording => 204; GET => 404
-        print_div("9. DELETE + GET 404")
+        # 9 DELETE recording => 204; GET => 404; include_deleted=1 200 is_deleted=True
+        print_div("9. Soft DELETE + 204 + GET default 404 + include_deleted=1 200 + 再DELETE 404 + 幂等POST restore")
         r9d = await c.delete(f"{BASE}/v1/recordings/{rid}", timeout=20)
         chk("9.DELETE returns 204", 204, r9d.status_code)
         r9g = await c.get(f"{BASE}/v1/recordings/{rid}", timeout=20)
-        chk("9.GET detail after DELETE => 404", 404, r9g.status_code)
+        chk("9.GET detail after DELETE default=>404", 404, r9g.status_code)
         try:
             chk("9.404 code=NOT_FOUND", "NOT_FOUND", r9g.json()["error"]["code"])
         except Exception as e:
             chk("9.404 code parse", False, True, str(e)[:60])
+        # S1:?include_deleted=1 => 200 + is_deleted=True last_status=archived (Tv2 DoD3)
+        r9s = await c.get(f"{BASE}/v1/recordings/{rid}", params={"include_deleted":"1"}, timeout=20)
+        chk("S1.GET detail ?include_deleted=1 200", 200, r9s.status_code)
+        try:
+            b9 = r9s.json()
+            chk("S1.include_deleted=1 is_deleted=True", True, b9.get("is_deleted") is True)
+            chk("S1.last_status=archived", "archived", b9.get("last_status"))
+            chk("S1.deleted_at not null", True, b9.get("deleted_at") is not None)
+        except Exception as e:
+            chk("S1.json parse S1", False, True, str(e)[:80])
+        # S2:再DELETE已删的 =>404 (exclude_deleted=True生效)
+        r9del2 = await c.delete(f"{BASE}/v1/recordings/{rid}", timeout=20)
+        chk("S2.再次对已删行DELETE =>404", 404, r9del2.status_code)
+        # S3:POST restore 200 is_deleted=False deleted_at=None summary仍然保留
+        r9rst = await c.post(f"{BASE}/v1/recordings/{rid}/restore", timeout=30)
+        chk("S3.POST restore =>200", 200, r9rst.status_code)
+        try:
+            brs = r9rst.json()
+            chk("S3.restore后is_deleted=False", False, brs.get("is_deleted"))
+            chk("S3.restore后deleted_at=None", None, brs.get("deleted_at"))
+            # 恢复后的summary不应丢失(软删只改标记不碰业务列)
+            su9 = brs.get("summary") or {}
+            chk("S3.restore后summary字段保留(非空)", True, bool(su9) and isinstance(su9.get("summary"),str) and len(su9.get("summary",""))>0)
+        except Exception as e:
+            chk("S3.restore parse 3 fields", False, True, str(e)[:80])
+        # S4:幂等restore(再一次POST restore)=>200不报错
+        r9rst2 = await c.post(f"{BASE}/v1/recordings/{rid}/restore", timeout=30)
+        chk("S4.二次幂等restore仍200(不409)", 200, r9rst2.status_code)
+        # S5:GET列表(restore后先有这个rid)→DELETE→再GET列表确实不包含已删行
+        r9l0 = await c.get(f"{BASE}/v1/recordings", params={"page":1,"page_size":50}, timeout=20)
+        ids_alive_before = set()
+        if r9l0.status_code == 200:
+            try:
+                ids_alive_before = {str(x.get("id")) for x in (r9l0.json().get("items") or []) if x.get("id")}
+            except Exception: pass
+        chk("S5a.DELETE前列表包含rid", True, rid in ids_alive_before)
+        # 执行第二次软删(restore后现在是alive)用于后续测试
+        await c.delete(f"{BASE}/v1/recordings/{rid}", timeout=20)
+        r9l1 = await c.get(f"{BASE}/v1/recordings", params={"page":1,"page_size":50}, timeout=20)
+        ids_alive_after = set()
+        if r9l1.status_code == 200:
+            try:
+                ids_alive_after = {str(x.get("id")) for x in (r9l1.json().get("items") or []) if x.get("id")}
+            except Exception: pass
+        chk("S5b.软删后列表不包含rid", False, rid in ids_alive_after)
+        # S6:同文件第三次上传(MD5不变但rid1已软删+函数UNIQUE让出槽)=> recording_id != rid (3-B)
+        files6 = {"file": ("third_time_same_bytes.wav", wav, "audio/wav")}
+        r6 = await c.post(f"{BASE}/v1/recordings", files=files6, timeout=60)
+        chk("S6.删后同MD5新上传200", 200, r6.status_code)
+        try:
+            rid6 = r6.json().get("recording_id")
+            chk("S6.删后同MD5新recording_id != old rid (3-B口径)", True, bool(rid6) and str(rid6) != str(rid))
+        except Exception as e:
+            chk("S6.3-B new id parse", False, True, str(e)[:60])
+        # S7:SQL置tasks.status=failed + recording.is_deleted=True(archived) → POST retry 409 message含"先恢复/restore"字样 (4-2口径)
+        import subprocess
+        MYSQL = r"C:\Program Files\MySQL\MySQL Server 8.0\bin\mysql.exe"
+        if Path(MYSQL).exists():
+            # 对S6新开的那条(alive)先真DELETE避免干扰,然后用老rid那条archived
+            if 'rid6' in dir() and rid6:
+                subprocess.run([MYSQL, "-uroot", "-proot", "-D", "xisiyun_asr", "-e",
+                                f"DELETE FROM tasks WHERE recording_id='{rid6}'; DELETE FROM recordings WHERE id='{rid6}'; "],
+                               capture_output=True, timeout=30)
+                # 也删掉uploads/rid6对应文件
+                import glob as _g; [Path(p).unlink(missing_ok=True) for p in _g.glob(str(ROOT/"uploads"/f"{rid6}.*"))]
+            # S7前置:把archived那条的tasks.status设为failed(否则retry直接TASK_NOT_FAILED不是目标分支)
+            subprocess.run([MYSQL, "-uroot", "-proot", "-D", "xisiyun_asr", "-e",
+                            f"UPDATE tasks SET status='failed' WHERE recording_id='{rid}' LIMIT 1;"],
+                           capture_output=True, timeout=30)
+            await asyncio.sleep(0.5)
+            # tasks/那一行 id先查出来
+            tids_in_rid = subprocess.run([MYSQL, "-uroot", "-proot", "-D", "xisiyun_asr", "-N", "-B", "-e",
+                                          f"SELECT id FROM tasks WHERE recording_id='{rid}' LIMIT 1;"],
+                                         capture_output=True, timeout=30, text=True)
+            tid_archived = (tids_in_rid.stdout or "").strip()
+            if tid_archived:
+                rs7 = await c.post(f"{BASE}/v1/tasks/{tid_archived}/retry", timeout=20)
+                chk("S7.已删recording下的task retry =>409", 409, rs7.status_code)
+                try:
+                    body7 = rs7.json()
+                    err_msg = str((body7.get("error") or {}).get("message") or "")
+                    chk("S7.409 message含'先恢复'/'restore'关键字", True,
+                        ("恢复" in err_msg) or ("restore" in err_msg.lower()))
+                    chk("S7.code=TASK_NOT_RETRYABLE", "TASK_NOT_RETRYABLE", (body7.get("error") or {}).get("code"))
+                except Exception as e:
+                    chk("S7.409 error parse", False, True, str(e)[:100])
+            else:
+                chk("S7.archived tid found for retry 409", True, False, "no task row under archived rid(检查FK cascade?)")
+        # S8:再restore rid一次 → GET list又能看到;结束
+        rs8 = await c.post(f"{BASE}/v1/recordings/{rid}/restore", timeout=30)
+        chk("S8.final restore =>200", 200, rs8.status_code)
+        r9l2 = await c.get(f"{BASE}/v1/recordings", params={"page":1,"page_size":50}, timeout=20)
+        ids_end = set()
+        if r9l2.status_code == 200:
+            try:
+                ids_end = {str(x.get("id")) for x in (r9l2.json().get("items") or []) if x.get("id")}
+            except Exception: pass
+        chk("S8.restore后列表又含rid", True, rid in ids_end)
 
         # 10 EXTRA: GET /v1/tasks list paged 200 (previously missing 404)
         print_div("EXTRA. GET /v1/tasks?page=1&page_size=5 200 (prev bug: 404)")

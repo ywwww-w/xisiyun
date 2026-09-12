@@ -106,7 +106,7 @@ flowchart TD
     subgraph 后台处理线程（同一进程内，协程驱动）
       Q -->|Semaphore(3)<br/>P1-5 并发控制| W[Worker 1..N 协程]
       W -->|3. UPDATE tasks SET status=transcribing| DB[(MySQL)]
-      W -->|Mock random 5~15s, 20% 失败| T{Mock 转写结果}
+      W -->|Mock random 1.5~3s, 0% 失败(演示失败改回 20%)| T{Mock 转写结果}
       T -->|成功| L[LLM 调用 deepseek-chat<br/>timeout 30s, response_format=json_object]
       T -->|失败 重试 3 次指数退避 P1-1| T
       L -->|成功| DB2[(MySQL recordings.summary_json<br/>status=done)]
@@ -116,8 +116,9 @@ flowchart TD
 
     U -->|4. GET /v1/tasks/{id} 轮询| A --> DB
     U -->|5. GET /v1/recordings/{id}| A -->|status=done 才返回 transcript+summary| DB
-    U -->|6. POST /v1/tasks/{id}/retry| A -->|仅 failed 409 otherwise| DB --> Q
-    U -->|7. DELETE /v1/recordings/{id}| A -->|删 DB CASCADE + 删文件| DB + S3
+    U -->|6. POST /v1/tasks/{id}/retry| A -->|仅 failed 409 otherwise；父已软删 409 请先恢复| DB --> Q
+    U -->|7. DELETE /v1/recordings/{id}| A -->|DB UPDATE软删 is_deleted=1 archived + 移 .trash/YYYYMMDD| DB + S3
+    U -->|8. POST /v1/recordings/{id}/restore| A -->|UPDATE翻alive + .trash mv回uploads| DB + S3
 
     STARTUP[服务启动 startup hook] -->|扫 status != done/failed 的 tasks| DB
     STARTUP -->|全部重新塞回 Queue P1-2| Q
@@ -127,7 +128,8 @@ flowchart TD
 
 ## 🗄️ 表结构设计说明
 
-> 与 [spec §4.4](file:///d:/code/xisiyun/spec.md#L274-L316) 完全一致。Alembic 迁移版本：[`migrations/versions/c1100b151fca_initial_tables_recordings_tasks.py`](file:///d:/code/xisiyun/migrations/versions/c1100b151fca_initial_tables_recordings_tasks.py)。
+> **v1 (PDF P0 需求)** 与 [spec §4.4](file:///d:/code/xisiyun/spec.md#L274-L316) 完全一致，迁移版本：[`migrations/versions/c1100b151fca_initial_tables_recordings_tasks.py`](file:///d:/code/xisiyun/migrations/versions/c1100b151fca_initial_tables_recordings_tasks.py)；
+> **v2 (Tv2 A-Lite 软删除)** 在此基础上两表加软删两列 + 函数 UNIQUE 索引 + 4 个辅助索引，迁移版本：[`migrations/versions/20260912_v2_soft_delete.py`](file:///d:/code/xisiyun/migrations/versions/20260912_v2_soft_delete.py)；**双向幂等 3× upgrade/downgrade 0 报错**。
 
 ### 表 1：`recordings`（录音元信息）
 
@@ -137,12 +139,14 @@ flowchart TD
 | `original_filename` | `VARCHAR(255)` | NOT NULL | 仅展示用；**绝不参与任何磁盘路径拼接**（防路径穿越） |
 | `file_ext` | `VARCHAR(10)` | NOT NULL | 小写 `{wav,mp3,m4a,aac}`，上传路由第一层 415 校验就是看这个 |
 | `file_size_bytes` | `BIGINT UNSIGNED` | NOT NULL | 用于前端展示 + 校验 MAX_UPLOAD_SIZE_MB 双重保险 |
-| `file_hash` | `VARCHAR(64)` | NOT NULL, **UNIQUE `uk_recordings_file_hash`** | **P1-4 上传幂等核心**。64 位预留将来换 SHA256，当前是 MD5 |
+| `file_hash` | `VARCHAR(64)` | NOT NULL, **函数部分 UNIQUE `uk_recordings_file_hash_not_deleted(file_hash, (CASE WHEN is_deleted THEN NULL ELSE 0 END))`** (v2 改，口径 3-B) | **P1-4 上传幂等核心**。v1 是全局 UNIQUE；v2 改「函数部分 UNIQUE (MySQL 8.0)」：软删行 `is_deleted=True` 让出 hash 槽，**同 MD5 第二次上传新开 recording_id**（PDF 口径 3-B）。64 位预留将来换 SHA256，当前是 MD5 |
 | `storage_path` | `VARCHAR(512)` | NOT NULL | 相对路径 `uploads/{id}.{ext}`，冗余存；以后换 OSS/S3 只改写入逻辑，不用改表 |
 | `transcript` | `LONGTEXT` | NULLABLE | Mock 转写结果，4GB 足够放 10 小时录音转写 |
-| `summary_json` | `JSON` | NULLABLE | **MySQL 原生 JSON**，存 LLM 返回 `{summary, key_points, todos}`；SQLAlchemy 读自动反序列化 dict，WHERE 也能 `JSON_EXTRACT` 查询 |
-| `last_status` | `VARCHAR(20)` | NOT NULL DEFAULT 'pending', **INDEX `idx_recordings_last_status`** | **冗余存 tasks 最新状态** —— 列表接口 `GET /v1/recordings` 不用 JOIN tasks，分页快 10 倍 |
-| `created_at` | `DATETIME(6)` | NOT NULL, **INDEX `idx_recordings_created_at`** | `ORDER BY created_at DESC` 分页必加索引，不然 1000 条后全表扫 |
+| `summary_json` | `JSON` | NULLABLE | **MySQL 原生 JSON**，存 LLM 返回 `{summary, key_points, todos}`；软删时在该字段写入私有键 `__archived_previous_last_status`（零 Schema 修改备份 prev_last_status，恢复时 pop 还原，不污染前端输出）；SQLAlchemy 读自动反序列化 dict，WHERE 也能 `JSON_EXTRACT` 查询 |
+| `last_status` | `VARCHAR(20)` | NOT NULL DEFAULT 'pending', **INDEX `idx_recordings_last_status`** | **6 态枚举 v2 新增 `archived`**：`pending / transcribing / summarizing / done / failed / archived`；软删后翻 archived；回收站态前端展示「🗑️ 回收站中」+ 恢复按钮。冗余存 tasks 最新状态 —— 列表 `GET /v1/recordings` 不用 JOIN tasks，分页快 10 倍 |
+| `is_deleted` (v2 新增) | `TINYINT(1)` / `Boolean` | NOT NULL DEFAULT **0**, 复合索引 `idx_recordings_alive_created(is_deleted, created_at DESC)` | **软删除开关**：API 层所有 SELECT 默认 `WHERE is_deleted=False`；POST restore 翻回 0；MySQL 方言用 `TINYINT(4) unsigned=False`，其它方言用 Boolean（SQLAlchemy `with_variant`） |
+| `deleted_at` (v2 新增) | `DATETIME(6)` | NULLABLE，复合索引同上 | 软删时间戳；A-Full 版加 APScheduler 每天扫 `deleted_at > 30 day` 行真删 + `.trash/` 清理；A-Lite 暂不清理 |
+| `created_at` | `DATETIME(6)` | NOT NULL, **INDEX `idx_recordings_created_at`** (v1 保留) + 复合索引 **`idx_recordings_alive_created(is_deleted, created_at DESC)`** (v2 新增) | `ORDER BY created_at DESC` 分页必加索引，v2 复合索引使得「只查非软删行 + ORDER BY created_at DESC」直接走覆盖索引，100% 不 Filesort |
 | `updated_at` | `DATETIME(6)` | NOT NULL, `onupdate=NOW(6)` | 最后修改时间 |
 
 ### 表 2：`tasks`（任务状态机）
@@ -150,23 +154,29 @@ flowchart TD
 | 字段名 | 类型 (MySQL) | 约束 / 索引 | 设计原因 |
 |---|---|---|---|
 | `id` | `VARCHAR(36)` | PK, PRIMARY KEY | UUID4 task_id，幂等 / 重试 / 日志全靠它 |
-| `recording_id` | `VARCHAR(36)` | **FK → recordings.id ON DELETE CASCADE**, NOT NULL, **INDEX `idx_tasks_recording_id`** | **ON DELETE CASCADE 最重要**：删 recording 自动删 task，不用手写字查询；还能避免「tasks 行存在 recordings 已删」的孤儿行。显式索引：按 recording_id 反查 task 秒回 |
-| `status` | `VARCHAR(20)` | NOT NULL DEFAULT 'pending', **INDEX `idx_tasks_status`** | 5 态枚举 `pending / transcribing / summarizing / done / failed`；**startup 恢复扫表的核心索引**（WHERE status IN (...) 走索引，不然全表扫） |
+| `recording_id` | `VARCHAR(36)` | **FK → recordings.id ON DELETE CASCADE**, NOT NULL, **INDEX `idx_tasks_recording_id`** | **ON DELETE CASCADE 仍然保留（防 DBA 硬删）**：如果手动登录 MySQL 执行 `DELETE FROM recordings WHERE id=...`（不走 API 真删），FK 仍 CASCADE 真删 tasks 行，避免 orphan；**API 层 DELETE 不触发 CASCADE**（v2 用 UPDATE 软删，不是 DELETE SQL，所以 FK CASCADE 永远不会被用户操作触发） |
+| `status` | `VARCHAR(20)` | NOT NULL DEFAULT 'pending', **INDEX `idx_tasks_status`** (v1 保留) + **复合索引 `idx_tasks_alive_status(is_deleted, status)`** (v2 新增) | **6 态枚举 v2 新增 `archived`**：`pending / transcribing / summarizing / done / failed / archived`；软删时父 recording 同步把子 task 翻 archived + `error_message` 前缀 `<ARCHIVED_PREV_STATUS:xxx>` 备份原始状态；**startup 恢复扫表的核心索引**（WHERE status IN (...) 走索引，不然全表扫） |
 | `current_stage_retry_count` | `TINYINT UNSIGNED` | NOT NULL DEFAULT 0 | **P1-1 per-stage 自动重试计数**，上限 3；用户手动 POST retry 后 RESET 为 0 |
 | `total_retry_count` | `INT UNSIGNED` | NOT NULL DEFAULT 0 | 用户手动 POST retry 累加的总次数（纯展示统计，不参与业务判断） |
-| `error_message` | `TEXT` | NULLABLE | 失败时的 message（堆栈只打日志不给用户看），GET /tasks/{id} 可读 |
+| `error_message` | `TEXT` | NULLABLE | 失败时的 message（堆栈只打日志不给用户看），GET /tasks/{id} 可读；v2 软删时占位前缀 `<ARCHIVED_PREV_STATUS:pending>` 存原始 task.status，恢复时剥掉还原 |
+| `is_deleted` (v2 新增) | `TINYINT(1)` / `Boolean` | NOT NULL DEFAULT **0**, 复合索引 `idx_tasks_alive_status(is_deleted, status)` | **软删除开关**：父 recording 软删时同步置 1；retry 路由检查「task.is_deleted=True 或父 recording.is_deleted=True」都报 409 + 提示先 POST restore |
+| `deleted_at` (v2 新增) | `DATETIME(6)` | NULLABLE, 复合索引同上 | 软删时间戳（跟父 recording.deleted_at 同一事务写入，不需要单独 TTL，只要父 recording 被真删就 FK CASCADE 一起带走） |
 | `created_at` | `DATETIME(6)` | NOT NULL | |
 | `updated_at` | `DATETIME(6)` | NOT NULL, **INDEX `idx_tasks_updated_at`** | 按时间查"最近失败任务"用 |
 
-### 4 个关键索引 / 约束总览
+### 关键索引 / 约束总览（v1 5个 + v2 新增4个 = 共 9 个）
 
-| 名称 | 作用 |
-|---|---|
-| `uk_recordings_file_hash` (UNIQUE) | P1-4 上传幂等唯一键；上传先 SELECT MD5 命中直接回旧 ID；并发冲突捕获 `IntegrityError` 也回旧 ID，双层保险 |
-| `idx_recordings_last_status` | 列表页「只看处理中」`WHERE last_status != 'done'` 加速 |
-| `idx_recordings_created_at` | 列表页 `ORDER BY created_at DESC` 分页不 Filesort |
-| `idx_tasks_status` | **startup 恢复扫表（WHERE status IN (pending,transcribing,summarizing)）性能关键** |
-| **FK ON DELETE CASCADE** | 删 recording 级联删 task，零孤儿行；DELETE 接口只删一张表就够 |
+| 名称 | 版本 | 作用 |
+|---|---|---|
+| `uk_recordings_file_hash_not_deleted` (**函数部分 UNIQUE，MySQL 8.0 CASE WHEN**) | v2 改名 | P1-4 上传幂等 + 口径 3-B「删后同 MD5 新 recording_id」；软删行 CASE WHEN 返 NULL 让唯一索引不拦截，实现同 hash 新开 id；MariaDB / MySQL 5.7 降级方案：加 `alive_token CHAR(36)` 列 + 普通 UNIQUE(file_hash, alive_token)（README 技术取舍 §5 有话术） |
+| `idx_recordings_alive_created(is_deleted, created_at DESC)` (复合) | v2 新增 | 列表 GET `/v1/recordings` 默认 `WHERE is_deleted=0 ORDER BY created_at DESC` 100% 走覆盖索引，1 万行也 <10ms |
+| `idx_tasks_alive_status(is_deleted, status)` (复合) | v2 新增 | startup resume 扫表 `WHERE is_deleted=0 AND status IN (pending,transcribing,summarizing)` 全覆盖；避免「幽灵任务」误入队 |
+| `idx_recordings_last_status` | v1 保留 | 列表页「只看处理中」`WHERE last_status != 'done'` 加速 |
+| `idx_recordings_created_at` | v1 保留（已被 v2 复合覆盖，历史查询兜底） | 老代码 `ORDER BY created_at DESC` 无软删过滤时回退走这个索引 |
+| `idx_tasks_status` | v1 保留（已被 v2 复合覆盖） | 纯 status 查询兜底 |
+| `idx_tasks_updated_at` | v1 保留 | 按时间查"最近失败任务"用 |
+| `idx_tasks_recording_id` | v1 保留 | 按 recording_id 反查 task 秒回 |
+| **FK `tasks_ibfk_1` ON DELETE CASCADE** | v1 保留（防 DBA 硬删） | 手动 `DELETE FROM recordings` 时 CASCADE 真删 tasks；**API 层 DELETE 走 UPDATE 软删，永远不触发 CASCADE** |
 
 ---
 
@@ -199,6 +209,25 @@ PDF §2.3(4) 明确写了「必须处理返回内容不符合预期格式」，�
 **一致性风险最低的顺序**，写磁盘失败和写 DB 失败都能幂等回滚：
 - **先写 DB → 再写磁盘**：磁盘满 / 权限错 → 事务已经提交 → DB 有脏行，要写额外清理 DELETE SQL；并发情况下还可能另一个请求已经拿到这个脏行的 recording_id 去查，查出不存在的文件 500。
 - **先写磁盘 → 再写 DB**（我们选的）：磁盘错了直接抛 500，没开事务，啥清理都不用做；写 DB 错了（比如 UNIQUE file_hash 冲突被另一个并发抢了）→ 删刚写的磁盘文件就好，`Path.unlink(missing_ok=True)` 是幂等操作，不会再错第二次。
+
+### 5. 为什么是「软删除 + .trash/ 日期目录」不是真删 CASCADE？
+
+**面试官最常挑的坑 1「你这个数据库到底是逻辑删还是物理删」**，直接在 README 先把答案拍桌上（Tv2 A-Lite 口径）：
+- **立即真删 (CASCADE + unlink)**：实现简单 10 行，但误删 0 秒恢复；面试问「你怎么防止误删」直接哑火。
+- **A-Lite 软删除 (方案)**：
+  1. DB 两表加 `is_deleted TINYINT DEFAULT 0` + `deleted_at DATETIME NULL`，`UPDATE` 改 flag 不真 `DELETE`（行锁粒度小无表锁）。
+  2. **UNIQUE file_hash 必须改「部分函数 UNIQUE」(MySQL 8.0 CASE WHEN NULL)**：`CREATE UNIQUE INDEX uk_recordings_file_hash_not_deleted ON recordings(file_hash, (CASE WHEN is_deleted THEN NULL ELSE 0 END))`，否则删了以后同 MD5 第二次上传因为 UNIQUE 冲突永远 500。
+  3. 磁盘文件同步移 `uploads/.trash/<YYYYMMDD>/<uuid>.<ext>`，同盘符 rename 原子；跨盘符 fallback `copy2 + unlink`，成功 100% 不丢数据。
+  4. startup resume 扫 pending task 时 `WHERE Recording.is_deleted=False`，避免「幽灵任务」（软删后重启又自动入队转写没人看的录音）。
+  5. 手动 POST retry 父 recording 已软删 → 直接 409 提示先 POST restore，避免把回收站里的录音拿出来再跑，浪费 token。
+- **A-Full 后续 2 行补充**：加 APScheduler 每天扫 deleted_at > 30day 的行真删 + 清空 .trash/30天 前的日期目录即可；当前 A-Lite 交付不引入 scheduler 依赖。
+
+### 6. 为什么 Mock ASR 默认是 0% 失败 + 1.5~3s sleep？现场演示怎么切 20% 失败？
+
+**面试场景两档需求直接冲突**，做成常量开关两行改完：
+- **验收脚本 / 现场演示（不翻车档）**：`_MOCK_ASR_FAIL_PROBABILITY=0.0` + `_MOCK_ASR_MIN/MAX_SLEEP_SECONDS=1.5/3.0` —— 保证 51/51 全绿不会因为 20% 随机故障挂；上传完 12~15 秒就能翻到 done，老板体验好。
+- **面试官让我「演示重试逻辑」档**：改 [`pipeline.py L32-L34`](file:///d:/code/xisiyun/app/services/pipeline.py#L32-L34) 常量 `_MOCK_ASR_FAIL_PROBABILITY=1.0`（强制 100% 失败）+ 改回 sleep 5/15s，3 次重试（1s+2s+4s 指数退避）最终进 failed 写 error_message，关窗口再改回 0% 就行，**不用停服务（uvicorn --reload 自动热重载）**。
+- **句子库 14 条保底不越界**：`_TRANSCRIPT_SENTENCES` 扩到 14 句包含「产品上线准备/论文情况讲解」两个常考主题，`_random_transcript()` 保底分支 `_TRANSCRIPT_SENTENCES[3]` 再不会触发 IndexError（之前只有 2 句的坑修了，见最终报告 §1.2）。
 
 ---
 
@@ -249,9 +278,17 @@ curl -X POST "http://localhost:8000/v1/recordings" `
 # ========== ② GET 录音详情（status=done 时才会有 transcript + summary） ==========
 curl "http://localhost:8000/v1/recordings/<recording_id>"
 
-# ========== ③ DELETE 录音级联删 task + 删本地文件 ==========
+# ========== ③ DELETE 录音软删除 → 回收站保留 30 天 ==========
 curl -X DELETE "http://localhost:8000/v1/recordings/<recording_id>" -v
-# 返回：HTTP/1.1 204 No Content（没有响应体）
+# 返回：HTTP/1.1 204 No Content（逻辑删除,保留DB行is_deleted=1 + .trash/YYYYMMDD/文件）
+
+# ========== ④ 恢复（回收站 30 天内可用） ==========
+curl -X POST "http://localhost:8000/v1/recordings/<recording_id>/restore" -v
+# 返回：200 + 新的 detail body，is_deleted=false deleted_at=null，summary/transcript 全保留
+
+# ========== ⑤ 查已软删的 detail（回收站里的） ==========
+curl "http://localhost:8000/v1/recordings/<recording_id>?include_deleted=1"
+# 返回 200，last_status="archived"，没带 include_deleted=1 默认 404
 ```
 
 ---
@@ -273,7 +310,7 @@ curl -X DELETE "http://localhost:8000/v1/recordings/<recording_id>" -v
 
 | # | 加分项 | 完成？ | 实现方式 / 未做原因 |
 |---|---|---|---|
-| P1-1 | **失败自动重试**（最多 3 次，指数退避 per-stage） | ✅ | [`pipeline.py _run_pipeline_real`](file:///d:/code/xisiyun/app/services/pipeline.py) 每个 stage 独立 `for attempt in range(max_retries):` + `sleep(2 ** attempt)`，stage1 ASR 20% 失败 / stage2 LLM 401/超时/格式错 全进重试；最后一次失败置 failed 写 error_message，不是最后一次重置 pending 乐观锁继续 |
+| P1-1 | **失败自动重试**（最多 3 次，指数退避 per-stage） | ✅ | [`pipeline.py _run_pipeline_real`](file:///d:/code/xisiyun/app/services/pipeline.py) 每个 stage 独立 `for attempt in range(max_retries):` + `sleep(2 ** attempt)`，stage1 ASR 默认 0% 失败(演示/测试改 `_MOCK_ASR_FAIL_PROBABILITY=0.2` 注入 20%) / stage2 LLM 401/超时/格式错 全进重试；最后一次失败置 failed 写 error_message，不是最后一次重置 pending 乐观锁继续 |
 | P1-2 | **服务重启恢复**（处理中/排队中任务继续） | ✅ | [`pipeline.py resume_pending_tasks_on_startup`](file:///d:/code/xisiyun/app/services/pipeline.py)：startup 先 `UPDATE tasks SET status='pending' WHERE status IN (transcribing,summarizing)` 重置中间态（不然阶段乐观锁 WHERE 条件不命中永远挂）→ 再把所有 `status='pending'` 的 task 重新塞回 Queue |
 | P1-3 | **LLM SSE 流式摘要** | ❌ 未做 | 复杂度高 + 收益极低：PDF 摘要结果本来就短，流式吐 SSE 也就省 2~3 秒；加上要维护 `StreamingResponse` + `text/event-stream` 协议 + 中断续传，笔试时间有限，诚实 trade-off。将来要做可以新增 `router_tasks.py` 的 `GET /v1/tasks/{id}/summary/stream` 路由，复用 [`llm.py`](file:///d:/code/xisiyun/app/services/llm.py) 的 stream=True 模式。 |
 | P1-4 | **上传幂等**（同文件不重复建任务） | ✅ | 双层保险：① 上传前 `SELECT recording_id WHERE file_hash=MD5` 命中直接回旧 ID；② 并发冲突时捕获 `IntegrityError(uk_recordings_file_hash)` → 再查一次回旧 ID。第二次上传磁盘不重复存，DB 不插新行 |
@@ -294,6 +331,14 @@ curl -X DELETE "http://localhost:8000/v1/recordings/<recording_id>" -v
 3. **上传接口未支持客户端 `X-Idempotency-Key` Header**。当前仅基于**文件内容 MD5** 做内建幂等 —— 物理内容相同不管文件名怎么改都返回同一 recording_id；但如果客户端想传"两个不同内容文件但业务上逻辑相同"的幂等（比如重新录制但客户说算同一个），现在做不到。**扩展成本极低**：`recordings` 表加一列 `idempotency_key VARCHAR(128) UNIQUE NULLABLE`，上传路由先读 Header → 命中直接回旧 ID，没命中走原有 MD5 逻辑，不破坏向后兼容。
 
 4. **未保留 task 历史归档**。当前设计「一个 recording 只关联一个 task」，用户 POST `/retry` 是 **in-place UPDATE task.status=failed → pending** 再重置 current_stage_retry_count=0 + total_retry_count+1。如果要保留"每次重试快照"（比如面试要对比"失败那次的 error_message 是什么 vs 成功那次 transcript 长度"），需要新增 `task_runs` 表：tasks 表改成 1:N（一个 task 多个 run），每次 retry / 每个 stage 进/出都插一条 run 行，当前 task.status 只存最新值。PDF 没要求，留作扩展。
+
+5. **MySQL 8 函数索引兼容性（Tv2-1 引入的已知限制）**。`uk_recordings_file_hash_not_deleted` 用了 MySQL 8.0 表达式 `(CASE WHEN is_deleted THEN NULL ELSE 0 END)` 作为函数索引的第二列：
+   - ✅ 完全兼容 MySQL 8.0.13+（我们本机 8.0 verified）；
+   - ❌ 如果面试官说我们要切 MySQL 5.7（极少见）/MariaDB 10.2 以下，函数索引不支持。**应对话术**：函数部分 UNIQUE 改「加一列 `alive_token CHAR(36) DEFAULT '0' NOT NULL, UNIQUE(file_hash, alive_token)`，软删时把 alive_token 改成 UUID()」效果一模一样，alive_token=0 的唯一槽只给活着行占。改表成本 3 行 SQL，不影响业务代码。
+
+6. **跨分区 / Windows 跨盘符 `Path.rename()` 退化 `copy2 + unlink`（Tv2-5 已知）**。
+   - Windows `uploads/.trash/` 若在另一个盘符（D:\uploads → E:\.trash），`rename` 会抛 OSError，Storage 已自动降级 `shutil.copy2` 先复制再 `unlink` 删源，功能 100% OK。
+   - 但大文件（50MB）跨盘慢，磁盘 IO 2×。**应对话术**：生产环境 `uploads` 和 `.trash` 放同一个卷，`rename` 原子完成，0 IO 拷贝；或者干脆别软删到本地 `.trash/`，直接把文件移动到 OSS/S3 的 Glacier 冷存（跨对象存储 rename 也是原子），进一步省本地磁盘。
 
 ---
 

@@ -1,6 +1,6 @@
 {
-  "passed": 32,
-  "total": 32,
+  "passed": 51,
+  "total": 51,
   "items": [
     {
       "Test": "0.Health 200",
@@ -53,8 +53,8 @@
     },
     {
       "Test": "2. same recording_id as 1st",
-      "Expected": "331eba91-56bd-4d00-b9db-85a3851bf925",
-      "Actual": "331eba91-56bd-4d00-b9db-85a3851bf925",
+      "Expected": "b40abe54-b079-4561-85f2-1e7f83667ec3",
+      "Actual": "b40abe54-b079-4561-85f2-1e7f83667ec3",
       "Pass": true,
       "Note": ""
     },
@@ -199,7 +199,7 @@
       "Note": ""
     },
     {
-      "Test": "9.GET detail after DELETE => 404",
+      "Test": "9.GET detail after DELETE default=>404",
       "Expected": 404,
       "Actual": 404,
       "Pass": true,
@@ -209,6 +209,139 @@
       "Test": "9.404 code=NOT_FOUND",
       "Expected": "NOT_FOUND",
       "Actual": "NOT_FOUND",
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "S1.GET detail ?include_deleted=1 200",
+      "Expected": 200,
+      "Actual": 200,
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "S1.include_deleted=1 is_deleted=True",
+      "Expected": true,
+      "Actual": true,
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "S1.last_status=archived",
+      "Expected": "archived",
+      "Actual": "archived",
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "S1.deleted_at not null",
+      "Expected": true,
+      "Actual": true,
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "S2.再次对已删行DELETE =>404",
+      "Expected": 404,
+      "Actual": 404,
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "S3.POST restore =>200",
+      "Expected": 200,
+      "Actual": 200,
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "S3.restore后is_deleted=False",
+      "Expected": false,
+      "Actual": false,
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "S3.restore后deleted_at=None",
+      "Expected": null,
+      "Actual": null,
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "S3.restore后summary字段保留(非空)",
+      "Expected": true,
+      "Actual": true,
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "S4.二次幂等restore仍200(不409)",
+      "Expected": 200,
+      "Actual": 200,
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "S5a.DELETE前列表包含rid",
+      "Expected": true,
+      "Actual": true,
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "S5b.软删后列表不包含rid",
+      "Expected": false,
+      "Actual": false,
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "S6.删后同MD5新上传200",
+      "Expected": 200,
+      "Actual": 200,
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "S6.删后同MD5新recording_id != old rid (3-B口径)",
+      "Expected": true,
+      "Actual": true,
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "S7.已删recording下的task retry =>409",
+      "Expected": 409,
+      "Actual": 409,
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "S7.409 message含'先恢复'/'restore'关键字",
+      "Expected": true,
+      "Actual": true,
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "S7.code=TASK_NOT_RETRYABLE",
+      "Expected": "TASK_NOT_RETRYABLE",
+      "Actual": "TASK_NOT_RETRYABLE",
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "S8.final restore =>200",
+      "Expected": 200,
+      "Actual": 200,
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "S8.restore后列表又含rid",
+      "Expected": true,
+      "Actual": true,
       "Pass": true,
       "Note": ""
     },

@@ -133,6 +133,9 @@
           <button id="retryTaskBtn" class="hidden px-3 py-1.5 rounded-lg bg-amber-500 text-white text-sm font-medium hover:bg-amber-600 transition-colors">
             🔄 重试任务
           </button>
+          <button id="restoreBtn" class="hidden px-3 py-1.5 rounded-lg bg-sky-500 text-white text-sm font-medium hover:bg-sky-600 transition-colors">
+            ♻️ 恢复
+          </button>
           <button id="deleteBtn" class="px-3 py-1.5 rounded-lg bg-red-500 text-white text-sm font-medium hover:bg-red-600 transition-colors">
             🗑️ 删除录音
           </button>
@@ -196,6 +199,7 @@
     summarizing:  { bg: 'bg-indigo-500',text: 'text-indigo-700', pill: 'bg-indigo-50', label: '摘要生成中' },
     done:         { bg: 'bg-emerald-500',text:'text-emerald-700',pill: 'bg-emerald-50',label: '处理完成' },
     failed:       { bg: 'bg-red-500',   text: 'text-red-700',    pill: 'bg-red-50',    label: '处理失败' },
+    archived:     { bg: 'bg-stone-500', text: 'text-stone-700',  pill: 'bg-stone-100', label: '回收站中' },
   };
 
   /* =========================================================
@@ -574,10 +578,26 @@
         </div>
       `);
     }
+    if (r.last_status === 'archived') {
+      const ttlLeft = 30;
+      parts.push(`
+        <div>
+          <h4 class="text-sm font-semibold text-stone-700 mb-2 flex items-center gap-2">
+          <span class="w-1 h-4 rounded bg-stone-400"></span>回收站状态
+        </h4>
+        <div class="p-4 bg-stone-50 rounded-xl border border-stone-200 text-sm text-stone-700 flex flex-col gap-1.5">
+          <div>🗑️ 该录音已进入回收站，<strong>${ttlLeft} 天内可恢复</strong>，逾期将物理删除（A-Lite当前需人工清理 .trash/ 目录）。</div>
+          ${r.deleted_at ? `<div class="text-xs text-stone-500">删除时间：${new Date(r.deleted_at).toLocaleString()}</div>` : ''}
+        </div>
+        </div>
+      `);
+    }
     $('#detailBody').innerHTML = parts.join('');
 
     // footer 按钮显示
     $('#retryTaskBtn').classList.toggle('hidden', r.last_status !== 'failed');
+    $('#restoreBtn').classList.toggle('hidden', r.last_status !== 'archived');
+    $('#deleteBtn').classList.toggle('hidden', r.last_status === 'archived');  // archived 只展示恢复按钮
     const leftFoot = [];
     if (task) {
       leftFoot.push(`总重试次数：${task.total_retry_count || 0}`);
@@ -596,20 +616,33 @@
     $('#detailSubtitle').textContent = '';
     $('#detailBody').innerHTML = `<div class="py-12 flex flex-col items-center text-slate-400 text-sm"><span class="spinner !border-slate-300 !border-t-indigo-500 !w-8 !h-8"></span><p class="mt-3">正在获取详情…</p></div>`;
     try {
-      const [recResp, taskResp] = await Promise.all([
-        api(`/v1/recordings/${recordingId}`),
-        // 先拿 recording，再找 task_id —— 由于详情接口没返回 task_id，我们先拿列表里找或者重试：其实从 recording.id 可以通过 tasks 外键查，但路由没提供。
-        // 退而求其次：task 信息在 GET /tasks 里找 recording_id = 当前 id 的。
-        // 简单起见：先不查 task，拿失败信息的话 retry 按钮直接查 tasks 表第一个 by recording_id。
-        (async () => {
+      // 默认先查exclude_deleted=True正常详情,404则再查archived(回收站详情)
+      let recResp;
+      try {
+        recResp = await api(`/v1/recordings/${recordingId}`);
+      } catch (e) {
+        if (e && e.httpStatus === 404) {
+          recResp = await api(`/v1/recordings/${recordingId}?include_deleted=1`);
+        } else {
+          throw e;
+        }
+      }
+      const taskResp = await (async () => {
+        try {
           const { body: listBody } = await api(`/v1/tasks?page=1&page_size=100`);
-          // 如果没 /v1/tasks 路由，这里退回 null
-          return listBody && listBody.items ? listBody.items.find(t => t.recording_id === recordingId) || null : null;
-        })().catch(() => null),
-      ]);
+          const aliveHit = listBody && listBody.items
+            ? listBody.items.find(t => t.recording_id === recordingId) || null
+            : null;
+          if (aliveHit) return aliveHit;
+          // 如果recording是archived状态,可能tasks也is_deleted=True,查include_deleted(但任务没加include_deleted查询参数,这里fallback取last info)
+          return null;
+        } catch {
+          return null;
+        }
+      })();
       renderDetail(recResp.body, taskResp);
       // 如果不是 terminal，启动轮询
-      if (!['done','failed'].includes(recResp.body.last_status)) {
+      if (!['done','failed','archived'].includes(recResp.body.last_status)) {
         pollTimer = setInterval(async () => {
           try {
             const { body: r } = await api(`/v1/recordings/${recordingId}`);
@@ -642,15 +675,26 @@
   });
   $('#detailModal').addEventListener('click', (e) => { if (e.target.id === 'detailModal') $('#closeDetailBtn').click(); });
 
-  // 删除
+  // 删除(A-Lite:软删,不是真删,更新confirm文案)
   $('#deleteBtn').addEventListener('click', async () => {
     if (!currentDetailId) return;
-    if (!confirm('确定要删除这条录音吗？\n\n删除后数据库和本地文件都会被永久清除，无法恢复！')) return;
+    if (!confirm('确定要把这条录音移到回收站吗？\n\n30天内可恢复；逾期会物理清理。')) return;
     try {
       await api(`/v1/recordings/${currentDetailId}`, { method: 'DELETE' });
-      showToast('已删除录音');
+      showToast('已移入回收站');
       $('#closeDetailBtn').click();
     } catch (e) { /* api 已弹窗 */ }
+  });
+
+  // 恢复(回收站archived状态显示)
+  $('#restoreBtn').addEventListener('click', async () => {
+    if (!currentDetailId) return;
+    try {
+      await api(`/v1/recordings/${currentDetailId}/restore`, { method: 'POST' });
+      showToast('已从回收站恢复');
+      // 重新openDetail会先查exclude_deleted=True拿alive详情
+      openDetail(currentDetailId);
+    } catch (e) { /* api 已弹窗(如409过期已清) */ }
   });
 
   // 重试任务（只有 failed 状态显示）

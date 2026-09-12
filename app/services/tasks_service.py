@@ -20,14 +20,16 @@ async def get_task_list_paged(
     """Paged task list (symmetric with recordings list; frontend detail page polls
     this to find matching task_id by recording_id).
 
+    Tv2-4:默认过滤软删任务(一般跟父recording同步,但防御性过滤)
     ORDER BY updated_at DESC (most recently touched first).
     Returns (total_count, items_on_page).
     """
     total: int = int(await session.scalar(
-        select(func.count()).select_from(Task)
+        select(func.count()).select_from(Task).where(Task.is_deleted == False)
     ) or 0)
     stmt = (
         select(Task)
+        .where(Task.is_deleted == False)
         .order_by(Task.updated_at.desc())
         .offset((page - 1) * page_size)
         .limit(page_size)
@@ -36,11 +38,12 @@ async def get_task_list_paged(
     return total, list(rows)
 
 
-async def get_task_by_id_or_404(session: AsyncSession, task_id: str) -> Task:
+async def get_task_by_id_or_404(session: AsyncSession, task_id: str, *, exclude_deleted: bool = True) -> Task:
     """Return Task row or raise NotFoundException("Task", task_id)."""
-    row = (await session.execute(
-        select(Task).where(Task.id == task_id)
-    )).scalar_one_or_none()
+    stmt = select(Task).where(Task.id == task_id)
+    if exclude_deleted:
+        stmt = stmt.where(Task.is_deleted == False)
+    row = (await session.execute(stmt)).scalar_one_or_none()
     if row is None:
         raise NotFoundException("Task", task_id)
     return row
@@ -53,14 +56,15 @@ async def retry_task(
     """Manual retry entry (spec P0-6 + R5).
 
     Steps (strict order):
-        1. SELECT ... FOR UPDATE row lock on tasks.id
+        1. SELECT ... FOR UPDATE row lock on tasks.id (允许查deleted task,用于409提示restore)
         2. Not found -> NotFound
         3. Optimistic idempotency check: status != failed -> Conflict 409
-        4. UPDATE tasks: status=pending, current_stage_retry_count=0,
+        4. Tv2-4 防御: task.is_deleted or parent Recording.is_deleted → 409 "请先restore"
+        5. UPDATE tasks: status=pending, current_stage_retry_count=0,
            total_retry_count += 1, error_message=None;
            UPDATE recordings.last_status=pending (keep 2-table consistency)
-        5. session.commit() first (release lock)
-        6. Caller calls pipeline.enqueue_task(task_id) ONLY AFTER commit returns OK.
+        6. session.commit() first (release lock)
+        7. Caller calls pipeline.enqueue_task(task_id) ONLY AFTER commit returns OK.
 
     Returns (updated_task_ref, True). Caller is responsible for enqueue step
     because enqueue touches in-memory asyncio.Queue, which MUST NOT live in
@@ -89,6 +93,35 @@ async def retry_task(
         )
 
     recording_id = locked.recording_id
+    # 用户决策 4-2:父recording已软删(archived)→手动retry先409提示恢复
+    if locked.is_deleted:
+        raise ConflictException(
+            message=(
+                f"Task '{task_id}' 已随父录音进入回收站(status=archived)，"
+                f"请先调 POST /v1/recordings/{recording_id}/restore 恢复后再重试"
+            ),
+            code="TASK_NOT_RETRYABLE",
+            details={
+                "task_id": task_id,
+                "recording_id": recording_id,
+                "restore_hint": f"POST /v1/recordings/{recording_id}/restore",
+            },
+        )
+    parent_deleted = (await session.execute(
+        select(Recording.is_deleted).where(Recording.id == recording_id)
+    )).scalar_one_or_none()
+    if parent_deleted is True:
+        raise ConflictException(
+            message=(
+                f"该录音已进入回收站(status=archived)，请先调 POST /v1/recordings/{recording_id}/restore 恢复后再重试"
+            ),
+            code="TASK_NOT_RETRYABLE",
+            details={
+                "task_id": task_id,
+                "recording_id": recording_id,
+                "restore_hint": f"POST /v1/recordings/{recording_id}/restore",
+            },
+        )
     new_total = int(locked.total_retry_count or 0) + 1
     await session.execute(
         update(Task)
