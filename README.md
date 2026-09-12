@@ -301,7 +301,7 @@ curl -X DELETE "http://localhost:8000/v1/recordings/<recording_id>" -v
 
 - ☑️ **1. GitHub/Gitee 仓库（保留完整 commit 历史，禁止一次性提交）** —— 本仓库 git log Conventional Commits 风格（chore / feat / test / docs / refactor / fix），按 Ticket 数 ≥ 14 笔，没有「Initial commit」全仓一笔的陋习；`git log --oneline -n 20` 可验。
 - ☑️ **2. README.md（本节就是）** —— 含：运行方式（本节 🚀）、Mermaid 架构图（🧱）、表结构设计说明（🗄️）、技术取舍（🎯）、已知问题/未完成项（⚠️）、核心 API curl 示例×3（🧪 方式 3）、完成情况对齐 P0/P1（✅）—— 严格超过 PDF 要求的 6 节。
-- ☑️ **3. 一键启动方式** —— 本机 MySQL 已装前提下：`copy .env.example .env` 填 2 字段 → `pip install -r requirements.txt` → `alembic upgrade head` → `uvicorn app.main:app --reload --port 8000 --limit-max-request-size 52428800`（4 步，PDF 说"3 条命令内能跑"指前 3 条，uvicorn 也算一条）。
+- ☑️ **3. 一键启动方式** —— 本机 MySQL 已装前提下：`copy .env.example .env` 填 2 字段 → `pip install -r requirements.txt` → `alembic upgrade head` → `uvicorn app.main:app --reload --port 8000 --workers 1`（4 步，PDF 说"3 条命令内能跑"指前 3 条，uvicorn 也算一条；注意 `--workers 1` 是强制单进程，详见 Step 3 说明 · 不存在 uvicorn 层 `--limit-max-request-size` 参数，50MB 校验由业务层 `MAX_UPLOAD_SIZE_MB` 独立完成）。
 - ☑️ **4. 可导入 API 调试文件**：[`api_test.http`](file:///d:/code/xisiyun/api_test.http)（根目录）+ 本节「🧪 方式 3 curl ×3」；JetBrains / VS Code REST Client 双兼容；0~9b 块按顺序点完所有接口测一遍。
 
 ---

@@ -224,7 +224,7 @@ async def test_retry_409_on_non_failed_task(
 
     r1 = await client.post(f"/v1/tasks/{tid}/retry")
     assert r1.status_code == 409
-    assert r1.json()["error"]["code"] == "TASK_NOT_RETRYABLE"
+    assert r1.json()["error"]["code"] == "TASK_NOT_FAILED"
 
     await db_session.execute(
         update(Task)
@@ -244,7 +244,7 @@ async def test_retry_409_on_non_failed_task(
 
     r2 = await client.post(f"/v1/tasks/{tid}/retry")
     assert r2.status_code == 409
-    assert r2.json()["error"]["code"] == "TASK_NOT_RETRYABLE"
+    assert r2.json()["error"]["code"] == "TASK_NOT_FAILED"
 
     await _force_failed_in_db(db_session, tid)
     total_before = (
@@ -267,7 +267,7 @@ async def test_retry_409_on_non_failed_task(
 
     r4 = await client.post(f"/v1/tasks/{tid}/retry")
     assert r4.status_code == 409
-    assert r4.json()["error"]["code"] == "TASK_NOT_RETRYABLE"
+    assert r4.json()["error"]["code"] == "TASK_NOT_FAILED"
 
 
 @pytest.mark.asyncio

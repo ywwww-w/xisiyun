@@ -80,7 +80,7 @@ async def retry_task(
                 f"Task '{task_id}' is in status '{locked.status.value}', "
                 f"only 'failed' tasks can be retried. concurrent duplicate requests are not allowed."
             ),
-            code="TASK_NOT_RETRYABLE",
+            code="TASK_NOT_FAILED",
             details={
                 "task_id": task_id,
                 "current_status": locked.status.value,

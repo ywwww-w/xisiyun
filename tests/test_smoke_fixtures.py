@@ -144,4 +144,4 @@ async def test_retry_pending_returns_409(
     r = await client.post(f"/v1/tasks/{task_id}/retry")
     assert r.status_code == 409
     err = r.json()
-    assert err.get("error", {}).get("code") == "TASK_NOT_RETRYABLE", f"{r.text}"
+    assert err.get("error", {}).get("code") == "TASK_NOT_FAILED", f"{r.text}"

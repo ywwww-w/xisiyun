@@ -1,0 +1,230 @@
+{
+  "passed": 32,
+  "total": 32,
+  "items": [
+    {
+      "Test": "0.Health 200",
+      "Expected": 200,
+      "Actual": 200,
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "0.Health body.status == ok",
+      "Expected": "ok",
+      "Actual": "ok",
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "1.Upload 200",
+      "Expected": 200,
+      "Actual": 200,
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "1.status=pending",
+      "Expected": "pending",
+      "Actual": "pending",
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "1.recording_id len >=8",
+      "Expected": true,
+      "Actual": true,
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "1.task_id present",
+      "Expected": true,
+      "Actual": true,
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "2. 2nd upload 200",
+      "Expected": 200,
+      "Actual": 200,
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "2. same recording_id as 1st",
+      "Expected": "331eba91-56bd-4d00-b9db-85a3851bf925",
+      "Actual": "331eba91-56bd-4d00-b9db-85a3851bf925",
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "3. txt => 415",
+      "Expected": 415,
+      "Actual": 415,
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "3. code=UNSUPPORTED_MEDIA_TYPE",
+      "Expected": "UNSUPPORTED_MEDIA_TYPE",
+      "Actual": "UNSUPPORTED_MEDIA_TYPE",
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "4. 51MB => 413 (not 200)",
+      "Expected": 413,
+      "Actual": 413,
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "4. code=PAYLOAD_TOO_LARGE",
+      "Expected": "PAYLOAD_TOO_LARGE",
+      "Actual": "PAYLOAD_TOO_LARGE",
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "5.GET task status 200",
+      "Expected": 200,
+      "Actual": 200,
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "5.status in 5 enum",
+      "Expected": true,
+      "Actual": true,
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "6. Final in {done,failed} within 90s",
+      "Expected": true,
+      "Actual": true,
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "6. Final status expected done",
+      "Expected": "done",
+      "Actual": "done",
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "7.detail 200",
+      "Expected": 200,
+      "Actual": 200,
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "7.last_status matches final",
+      "Expected": "done",
+      "Actual": "done",
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "7.transcript>=500 chars",
+      "Expected": true,
+      "Actual": true,
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "7.summary object present",
+      "Expected": true,
+      "Actual": true,
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "7.summary: summary is str",
+      "Expected": true,
+      "Actual": true,
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "7.summary: key_points is list[str] len>=1",
+      "Expected": true,
+      "Actual": true,
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "7.summary: todos is list[str]",
+      "Expected": true,
+      "Actual": true,
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "8.first retry 200",
+      "Expected": 200,
+      "Actual": 200,
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "8.retry returns status pending",
+      "Expected": "pending",
+      "Actual": "pending",
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "8.second retry (already pending) 409",
+      "Expected": 409,
+      "Actual": 409,
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "8.retry 409 code TASK_NOT_FAILED",
+      "Expected": "TASK_NOT_FAILED",
+      "Actual": "TASK_NOT_FAILED",
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "9.DELETE returns 204",
+      "Expected": 204,
+      "Actual": 204,
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "9.GET detail after DELETE => 404",
+      "Expected": 404,
+      "Actual": 404,
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "9.404 code=NOT_FOUND",
+      "Expected": "NOT_FOUND",
+      "Actual": "NOT_FOUND",
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "X.tasks list 200 (previously 404 triggered upload error modal)",
+      "Expected": 200,
+      "Actual": 200,
+      "Pass": true,
+      "Note": ""
+    },
+    {
+      "Test": "X.tasks list paged schema has total/page/page_size/items",
+      "Expected": true,
+      "Actual": true,
+      "Pass": true,
+      "Note": ""
+    }
+  ]
+}
