@@ -128,34 +128,34 @@ curl http://localhost:8000/health
 
 ```mermaid
 flowchart TD
-    U[客户端] -->|1. POST multipart file| A[FastAPI Web 进程<br/>uvicorn 1 个多 worker]
-    A -->|1a. 校验扩展名/大小| A
-    A -->|1b. 流式算 MD5| H[(MySQL recordings.file_hash UNIQUE)]
-    H -->|命中| R[返回旧 recording_id<br/>P1-4 幂等]
-    H -->|未命中| S3[本地磁盘<br/>./uploads/{id}.ext]
-    S3 -->|写成功| H2[(MySQL 插 recordings + tasks<br/>status=pending)]
-    H2 -->|立即返回 pending| U
-    H2 -->|2. asyncio.Queue.put_nowait(task_id)| Q[内存队列<br/>asyncio.Queue]
+    Client[客户端] -->|1. POST multipart file| FastAPI[FastAPI Web 进程<br/>uvicorn 1 worker<br/>多协程]
+    FastAPI -->|1a. 校验扩展名/大小| FastAPI
+    FastAPI -->|1b. 流式算 MD5| HashIdx[(MySQL<br/>recordings.file_hash 函数部分 UNIQUE)]
+    HashIdx -->|命中| ReturnOld[返回旧 recording_id<br/>P1-4 幂等<br/>不写文件不入队]
+    HashIdx -->|未命中| Storage[本地磁盘存储<br/>./uploads&#47;{id}.{ext}<br/>Tv2: .trash&#47;YYYYMMDD&#47;{id}.{ext}]
+    Storage -->|写成功| InsertTask[(MySQL<br/>插 recordings + tasks<br/>status = pending)]
+    InsertTask -->|立即返回 pending| Client
+    InsertTask -->|2. asyncio.Queue.put_nowait(task_id)| Queue[内存队列<br/>asyncio.Queue]
 
-    subgraph 后台处理线程（同一进程内，协程驱动）
-      Q -->|Semaphore(3)<br/>P1-5 并发控制| W[Worker 1..N 协程]
-      W -->|3. UPDATE tasks SET status=transcribing| DB[(MySQL)]
-      W -->|Mock random 1.5~3s, 0% 失败(演示失败改回 20%)| T{Mock 转写结果}
-      T -->|成功| L[LLM 调用 deepseek-chat<br/>timeout 30s, response_format=json_object]
-      T -->|失败 重试 3 次指数退避 P1-1| T
-      L -->|成功| DB2[(MySQL recordings.summary_json<br/>status=done)]
-      L -->|超时/JSON 格式错 重试 3 次 P1-1| L
-      L -->|重试耗尽| DBF[(tasks.status=failed<br/>error_message=堆栈)]
+    subgraph 后台处理 同进程 协程驱动
+      Queue -->|Semaphore 3<br/>P1-5 并发控制| Workers[Worker 1 .. 5 协程]
+      Workers -->|3. UPDATE tasks<br/>SET status = transcribing<br/>乐观锁 WHERE status=pending| DbMain[(MySQL)]
+      Workers -->|Mock random 1.5~3s<br/>默认 0% 失败 演示改 20%| MockAsr{Mock 转写结果<br/>500~1500 字 论文&#47;产品主题}
+      MockAsr -->|成功| Llm[LLM 调用 deepseek-flash<br/>timeout 30s<br/>response_format = json_object]
+      MockAsr -->|失败 重试 3 次指数退避 P1-1| MockAsr
+      Llm -->|成功| DbDone[(MySQL<br/>recordings.summary_json<br/>status = done)]
+      Llm -->|超时&#47;JSON 格式错 重试 3 次 P1-1| Llm
+      Llm -->|重试耗尽| DbFail[(MySQL<br/>tasks.status = failed<br/>error_message 堆栈)]
     end
 
-    U -->|4. GET /v1/tasks/{id} 轮询| A --> DB
-    U -->|5. GET /v1/recordings/{id}| A -->|status=done 才返回 transcript+summary| DB
-    U -->|6. POST /v1/tasks/{id}/retry| A -->|仅 failed 409 otherwise；父已软删 409 请先恢复| DB --> Q
-    U -->|7. DELETE /v1/recordings/{id}| A -->|DB UPDATE软删 is_deleted=1 archived + 移 .trash/YYYYMMDD| DB + S3
-    U -->|8. POST /v1/recordings/{id}/restore| A -->|UPDATE翻alive + .trash mv回uploads| DB + S3
+    Client -->|4. GET &#47;v1&#47;tasks&#47;{id} 轮询| FastAPI --> DbMain
+    Client -->|5. GET &#47;v1&#47;recordings&#47;{id}| FastAPI -->|status = done 才返回 transcript + summary| DbMain
+    Client -->|6. POST &#47;v1&#47;tasks&#47;{id}&#47;retry| FastAPI -->|仅 failed 200 翻 pending<br/>否则 409 TASK_NOT_FAILED<br/>父已软删 409 请先 restore| DbMain --> Queue
+    Client -->|7. DELETE &#47;v1&#47;recordings&#47;{id}| FastAPI -->|UPDATE 软删 is_deleted=1 archived<br/>storage_path 移 .trash| DbMain + Storage
+    Client -->|8. POST &#47;v1&#47;recordings&#47;{id}&#47;restore Tv2 A-Lite| FastAPI -->|UPDATE 翻 alive is_deleted=0<br/>.trash mv 回 uploads| DbMain + Storage
 
-    STARTUP[服务启动 startup hook] -->|扫 status != done/failed 的 tasks| DB
-    STARTUP -->|全部重新塞回 Queue P1-2| Q
+    StartupHook[服务启动 startup hook] -->|扫 status != done&#47;failed<br/>WHERE 双 is_deleted=False| DbMain
+    StartupHook -->|全部重新塞回 Queue P1-2<br/>重启恢复不永久挂起| Queue
 ```
 
 ---
