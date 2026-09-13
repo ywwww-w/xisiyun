@@ -52,7 +52,7 @@ copy .env.example .env
 | ⚙️ 可选 | `STORAGE_UPLOAD_DIR` | `./uploads` | Path | - | 本地文件存储目录（自动创建） |
 | ⚙️ 可选 | `PIPELINE_MAX_AUTO_RETRIES` | `3` | int | 1–10 | **P1-1 自动重试上限**（指数退避 per-stage） |
 
-### Step 3：装依赖 + 建表 + 启动（3 条复制粘贴就完事）
+### Step 3：装依赖 + 建表 + 启动后端（3 条复制粘贴就完事，PDF P0 必做全靠它）
 
 ```powershell
 pip install -r requirements.txt
@@ -62,6 +62,28 @@ uvicorn app.main:app --reload --port 8000 --workers 1
 > **两个必加参数说明（千万不要漏）**：
 > - `--workers 1`：**只能开 1 个 worker**。P1-1/P1-2/P1-5（自动重试 / 重启恢复 / 并发控制 Semaphore）全部依赖内存态 `asyncio.Queue`，多 workers = 多进程各自独立 Queue，会出现「任务永远 pending / 两个进程同时消费一个 task 乐观锁冲突」各种 bug。
 > - **为什么没有 50MB uvicorn 层参数？** uvicorn 没有 `--limit-max-request-size` 这个参数（是 gunicorn 的）！50MB 硬限制已经在业务层 [router_recordings.py `_MAX_BYTES = settings.max_upload_size_mb * 1024*1024`](file:///d:/code/xisiyun/app/api/v1/router_recordings.py) 完成了：前端上传 / curl / api_test.http 传 >50MB，立即 **HTTP 413** + 已写入的文件自动清理，零风险。
+
+---
+
+### Step 4：启动前端界面（加分项，非 PDF P0 必做；**新开一个 PowerShell 窗口**执行）
+
+> **注意**：这一步和 Step 3 的 uvicorn **不能在同一个 Terminal 跑**（uvicorn 占前台）。必须再开一个 PowerShell / cmd Tab。
+
+```powershell
+cd d:\code\xisiyun\frontend
+python -m http.server 5173 --bind 127.0.0.1
+```
+
+启动后浏览器访问 **http://127.0.0.1:5173/** 就能看到上传界面。功能：上传音频文件 → 自动 2s 轮询 4 态 → 完成后弹窗显示 转录 / 摘要 / 关键要点 / 待办 → 详情 Modal 支持 软删除（回收站 30 天）/ ♻️ 恢复 / 再上传同 MD5 新 id。
+
+| 入口 | 命令 | URL | 什么时候用 |
+|------|------|-----|-----------|
+| ✅ 推荐（CORS 无坑） | `frontend/` 里起 `http.server 5173` | http://127.0.0.1:5173/ | 正式演示上传 / 看结果 |
+| 备选（应急看布局） | 直接双击 `frontend/index.html` | `file://` 协议 | 只看 UI 样式，上传功能大概率会被浏览器的 CORS/File 协议拦截 |
+
+> **两个前端常见坑提醒**：
+> - **为什么要 `--bind 127.0.0.1` 不加 0.0.0.0？** 笔试场景只用本机浏览器演示，绑 127.0.0.1 最安全，同网段其它机器扫不到；真要给别人演示再改成 `0.0.0.0` 加防火墙。
+> - **端口 5173 被占？** 换 `python -m http.server 5174`，然后访问 http://127.0.0.1:5174/，前端 fetch 后端写死的是 `http://127.0.0.1:8000` 不依赖前端端口，随便换。
 
 ---
 
@@ -79,11 +101,23 @@ docker ps
 
 ---
 
-### ✅ 一键启动验证（启动成功后立刻跑）
+### ✅ 一键启动验证（后端 & 前端各跑一条，10 秒内全绿就代表 OK）
 
+**1. 后端健康检查（FastAPI 8000）**：
 ```powershell
 curl http://localhost:8000/health
 # 期望：{"status":"ok"}
+```
+
+**2. 前端静态页检查（5173，选做）**：
+```powershell
+# PowerShell 专用版：
+(Invoke-WebRequest -Uri "http://127.0.0.1:5173/" -UseBasicParsing -TimeoutSec 5).StatusCode
+# 期望：200   （Content-Length 大约 36000 字节就是正常的 index.html）
+
+# curl / Git Bash 版：
+# curl -I http://127.0.0.1:5173/
+# 期望：HTTP/1.0 200 OK  Content-Type: text/html
 ```
 
 ---
